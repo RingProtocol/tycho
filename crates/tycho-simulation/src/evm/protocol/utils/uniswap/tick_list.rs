@@ -42,9 +42,25 @@ pub(crate) enum TickListErrorKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "TickListData")]
 pub(crate) struct TickList {
     tick_spacing: u16,
     ticks: Vec<TickInfo>,
+}
+
+/// Deserialized [`TickList`] fields, checked through [`TickList::from`].
+#[derive(Deserialize)]
+struct TickListData {
+    tick_spacing: u16,
+    ticks: Vec<TickInfo>,
+}
+
+impl TryFrom<TickListData> for TickList {
+    type Error = SimulationError;
+
+    fn try_from(data: TickListData) -> Result<Self, Self::Error> {
+        TickList::from(data.tick_spacing, data.ticks)
+    }
 }
 
 impl TickList {
@@ -52,6 +68,10 @@ impl TickList {
         let tick_list = TickList { tick_spacing: spacing, ticks };
         tick_list.valid_ticks()?;
         Ok(tick_list)
+    }
+
+    pub(crate) fn ticks(&self) -> &[TickInfo] {
+        &self.ticks
     }
 
     // Validates that all attributes are valid. Checks for:
@@ -677,5 +697,15 @@ mod tests {
 
         assert!(tick_list.get_tick(-10).is_err());
         assert!(tick_list.get_tick(10).is_err());
+    }
+
+    #[test]
+    fn test_deserialize_checks_tick_list() {
+        let ticks = vec![create_tick_info(20, 0), create_tick_info(10, 0)];
+        let json = serde_json::json!({ "tick_spacing": 10, "ticks": ticks });
+
+        let err = serde_json::from_value::<TickList>(json).unwrap_err();
+
+        assert!(err.to_string().contains("not ordered"), "unexpected error: {err}");
     }
 }
