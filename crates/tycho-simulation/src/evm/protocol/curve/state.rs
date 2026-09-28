@@ -10,7 +10,10 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{
+            Balances, GetAmountOutResult, PoolSwap, Price, ProtocolSim, QueryPoolSwapParams,
+            SwapConstraint,
+        },
     },
     Bytes,
 };
@@ -21,6 +24,7 @@ use crate::evm::{
         curve::{
             adapter::{build_pool, CurveVariant},
             math::Pool,
+            swap_to_price::{swap_to_price, SwapToPriceError},
             vm,
         },
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
@@ -99,6 +103,58 @@ impl CurveState {
             CRYPTOSWAP_GAS
         } else {
             STABLESWAP_GAS
+        }
+    }
+
+    /// Finds the swap to `target` with the native solver. Returns `None` when the target does not
+    /// fit in U256, the variant has no native solver, or the solver's math fails.
+    fn swap_to_target_price(
+        &self,
+        token_in: &Token,
+        token_out: &Token,
+        target: &Price,
+        tolerance: f64,
+    ) -> Result<Option<PoolSwap>, SimulationError> {
+        let i = self.coin_index(&token_in.address)?;
+        let j = self.coin_index(&token_out.address)?;
+        if target.numerator.bits() > 256 || target.denominator.bits() > 256 {
+            return Ok(None);
+        }
+        let target_num = biguint_to_u256(&target.numerator);
+        let target_den = biguint_to_u256(&target.denominator);
+
+        match swap_to_price(&self.pool, i, j, target_num, target_den, tolerance) {
+            Ok(dx) => {
+                if dx.is_zero() {
+                    let swap = PoolSwap::new(BigUint::ZERO, BigUint::ZERO, self.clone_box(), None);
+                    return Ok(Some(swap));
+                }
+                let result = self.get_amount_out(u256_to_biguint(dx), token_in, token_out)?;
+                Ok(Some(PoolSwap::new(u256_to_biguint(dx), result.amount, result.new_state, None)))
+            }
+            Err(SwapToPriceError::TargetAboveSpot) => {
+                let spot = self.spot_price(token_in, token_out)?;
+                let decimal_adjustment =
+                    10f64.powi(token_in.decimals as i32 - token_out.decimals as i32);
+                let target =
+                    u256_to_f64(target_num)? / u256_to_f64(target_den)? * decimal_adjustment;
+                Err(SimulationError::InvalidInput(
+                    format!("Target price {target} is above spot price {spot}"),
+                    None,
+                ))
+            }
+            Err(SwapToPriceError::TargetBelowLimit) => Err(SimulationError::InvalidInput(
+                format!(
+                    "Target price below reachable limit for curve pool {pool}",
+                    pool = self.pool_address
+                ),
+                None,
+            )),
+            Err(err @ SwapToPriceError::InvalidInput(_)) => Err(SimulationError::InvalidInput(
+                format!("{err} for curve pool {pool}", pool = self.pool_address),
+                None,
+            )),
+            Err(SwapToPriceError::UnsupportedVariant | SwapToPriceError::MathFailed) => Ok(None),
         }
     }
 }
@@ -255,6 +311,29 @@ impl ProtocolSim for CurveState {
         Ok(())
     }
 
+    /// Answers [`SwapConstraint::PoolTargetPrice`] on StableSwap pools with the native solver,
+    /// which ignores `min_amount_in` and `max_amount_in` and returns no `price_points`. All other
+    /// cases use the numerical search.
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        match params.swap_constraint() {
+            SwapConstraint::TradeLimitPrice { .. } => {
+                crate::evm::query_pool_swap::query_pool_swap(self, params)
+            }
+            SwapConstraint::PoolTargetPrice { target, tolerance, .. } => {
+                let native = self.swap_to_target_price(
+                    params.token_in(),
+                    params.token_out(),
+                    target,
+                    *tolerance,
+                )?;
+                match native {
+                    Some(swap) => Ok(swap),
+                    None => crate::evm::query_pool_swap::query_pool_swap(self, params),
+                }
+            }
+        }
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
@@ -277,10 +356,20 @@ impl ProtocolSim for CurveState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, str::FromStr};
+
+    use num_traits::ToPrimitive;
+    use rstest::rstest;
+    use tycho_common::{
+        models::Chain,
+        simulation::protocol_sim::{QueryPoolSwapParams, SwapConstraint},
+    };
 
     use super::*;
-    use crate::evm::protocol::curve::{adapter::RawPoolState, vm::encode_raw_state};
+    use crate::evm::{
+        protocol::curve::{adapter::RawPoolState, vm::encode_raw_state},
+        query_pool_swap::test_helpers::{target_price_params, to_price},
+    };
 
     const VARIANT: CurveVariant = CurveVariant::TriCryptoNG;
     const DECIMALS: [u8; 3] = [6, 8, 18];
@@ -395,5 +484,349 @@ mod tests {
         // Falling back to the indexed VM state would silently price a pending block against
         // confirmed state, so a malformed attribute must fail instead.
         assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
+    }
+
+    const WAD: u128 = 1_000_000_000_000_000_000;
+    const RATE_6_DEC: u128 = 1_000_000_000_000_000_000_000_000_000_000;
+
+    fn token(index: u8, decimals: u32) -> Token {
+        let address =
+            Bytes::from_str(&format!("0x00000000000000000000000000000000000000{index:02x}"))
+                .expect("valid address");
+        Token::new(
+            &address,
+            &format!("T{index}"),
+            decimals,
+            0,
+            &[Some(10_000)],
+            Chain::Ethereum,
+            100,
+        )
+    }
+
+    fn curve_state(pool: Pool, variant: CurveVariant, decimals: Vec<u8>) -> CurveState {
+        let tokens: Vec<Bytes> = (0..decimals.len())
+            .map(|k| token(k as u8, decimals[k] as u32).address)
+            .collect();
+        CurveState::new(
+            Bytes::from_str("0x00000000000000000000000000000000000000ff").expect("valid address"),
+            tokens,
+            decimals,
+            variant,
+            pool,
+        )
+    }
+
+    fn v1_two_coin_state() -> (CurveState, Token, Token) {
+        let pool = Pool::StableSwapV1 {
+            balances: vec![U256::from(50_000_000u128 * WAD), U256::from(48_000_000u128 * WAD)],
+            rates: vec![U256::from(WAD), U256::from(WAD)],
+            amp: U256::from(2000u64),
+            fee: U256::from(1_000_000u64),
+        };
+        (curve_state(pool, CurveVariant::StableSwapV1, vec![18, 18]), token(0, 18), token(1, 18))
+    }
+
+    fn v1_three_coin_mixed_state() -> (CurveState, Token, Token) {
+        // 3pool state at block 24669924: DAI (18 dec) in, USDC (6 dec) out.
+        let pool = Pool::StableSwapV1 {
+            balances: vec![
+                U256::from(63_975_337_809_806_329_031_583_135u128),
+                U256::from(61_219_263_170_093u128),
+                U256::from(37_832_425_459_809u128),
+            ],
+            rates: vec![U256::from(WAD), U256::from(RATE_6_DEC), U256::from(RATE_6_DEC)],
+            amp: U256::from(4000u64),
+            fee: U256::from(1_500_000u64),
+        };
+        (curve_state(pool, CurveVariant::StableSwapV1, vec![18, 6, 6]), token(0, 18), token(1, 6))
+    }
+
+    fn v1_three_coin_mixed_state_reverse() -> (CurveState, Token, Token) {
+        let (state, token_out, token_in) = v1_three_coin_mixed_state();
+        (state, token_in, token_out)
+    }
+
+    fn ng_dynamic_fee_state() -> (CurveState, Token, Token) {
+        let pool = Pool::StableSwapNG {
+            balances: vec![U256::from(1_500_000u128 * WAD), U256::from(700_000u128 * WAD)],
+            rates: vec![U256::from(WAD), U256::from(WAD)],
+            amp: U256::from(40_000u64),
+            fee: U256::from(4_000_000u64),
+            offpeg_fee_multiplier: U256::from(20_000_000_000u64),
+        };
+        (curve_state(pool, CurveVariant::StableSwapNG, vec![18, 18]), token(0, 18), token(1, 18))
+    }
+
+    fn meta_state() -> (CurveState, Token, Token) {
+        let pool = Pool::StableSwapMeta {
+            balances: vec![U256::from(500_000u128 * WAD), U256::from(480_000u128 * WAD)],
+            rates: vec![U256::from(WAD), U256::from(1_030_000_000_000_000_000u128)],
+            amp: U256::from(50_000u64),
+            fee: U256::from(4_000_000u64),
+        };
+        (curve_state(pool, CurveVariant::StableSwapMeta, vec![18, 18]), token(0, 18), token(1, 18))
+    }
+
+    fn two_crypto_ng_state() -> (CurveState, Token, Token) {
+        let wad = U256::from(WAD);
+        let pool = Pool::TwoCryptoNG {
+            balances: [U256::from(5000u64) * wad, U256::from(5000u64) * wad],
+            precisions: [U256::from(1u64), U256::from(1u64)],
+            price_scale: wad,
+            d: U256::from(10000u64) * wad,
+            ann: U256::from(540_000u64) * U256::from(10_000u64),
+            gamma: U256::from(11_809_167_828_997u64),
+            mid_fee: U256::from(3_000_000u64),
+            out_fee: U256::from(30_000_000u64),
+            fee_gamma: U256::from(230_000_000_000_000u64),
+        };
+        (curve_state(pool, CurveVariant::TwoCryptoNG, vec![18, 18]), token(0, 18), token(1, 18))
+    }
+
+    const TOLERANCE: f64 = 0.001;
+
+    /// Builds `PoolTargetPrice` params for a target of `spot * multiplier`, and returns the
+    /// target as f64.
+    fn spot_target_params(
+        state: &CurveState,
+        token_in: &Token,
+        token_out: &Token,
+        multiplier: f64,
+    ) -> (QueryPoolSwapParams, f64) {
+        let spot = state
+            .spot_price(token_in, token_out)
+            .expect("spot price");
+        let target_f64 = spot * multiplier;
+        let target = to_price(target_f64, token_in, token_out);
+        (target_price_params(token_in, token_out, target, TOLERANCE), target_f64)
+    }
+
+    #[rstest]
+    #[case::v1_two_coin_shallow(
+        v1_two_coin_state(),
+        0.9999,
+        "3125000000000000000000000",
+        "3124522947233337871723254"
+    )]
+    #[case::v1_two_coin_mid(
+        v1_two_coin_state(),
+        0.999,
+        "20815818212708836884611072",
+        "20807697163651534251587499"
+    )]
+    #[case::v1_two_coin_deep(
+        v1_two_coin_state(),
+        0.99,
+        "40286297791658419910868992",
+        "40222965433174808815786645"
+    )]
+    #[case::v1_mixed_decimals_18_to_6(
+        v1_three_coin_mixed_state(),
+        0.99,
+        "54421390124760608783990784",
+        "54356938367671"
+    )]
+    #[case::v1_mixed_decimals_6_to_18(
+        v1_three_coin_mixed_state_reverse(),
+        0.99,
+        "57262184060825",
+        "57196477819480303708501004"
+    )]
+    #[case::ng_dynamic_fee(
+        ng_dynamic_fee_state(),
+        0.99,
+        "355891912612531093897216",
+        "353717820129267318746246"
+    )]
+    #[case::ng_dynamic_fee_mid(
+        ng_dynamic_fee_state(),
+        0.999,
+        "50618895036072149385216",
+        "50462322642173418701766"
+    )]
+    #[case::meta_virtual_price(
+        meta_state(),
+        0.99,
+        "338629280984993354481664",
+        "327783854710930863303142"
+    )]
+    #[case::meta_virtual_price_mid(
+        meta_state(),
+        0.999,
+        "82316161682654559862784",
+        "79857602923877853762247"
+    )]
+    fn test_query_pool_swap_native_amounts(
+        #[case] setup: (CurveState, Token, Token),
+        #[case] multiplier: f64,
+        #[case] expected_in: &str,
+        #[case] expected_out: &str,
+    ) {
+        let (state, token_in, token_out) = setup;
+        let (params, _) = spot_target_params(&state, &token_in, &token_out, multiplier);
+
+        let swap = state
+            .query_pool_swap(&params)
+            .expect("native query_pool_swap");
+
+        assert_eq!(swap.amount_in().to_string(), expected_in);
+        assert_eq!(swap.amount_out().to_string(), expected_out);
+    }
+
+    /// The native result must land in the lower half of the tolerance band, and the numerical
+    /// result within five times the band.
+    #[rstest]
+    #[case::v1_two_coin_shallow(v1_two_coin_state(), 0.9999)]
+    #[case::v1_two_coin_mid(v1_two_coin_state(), 0.999)]
+    #[case::v1_two_coin_deep(v1_two_coin_state(), 0.99)]
+    #[case::v1_mixed_decimals_18_to_6(v1_three_coin_mixed_state(), 0.99)]
+    #[case::v1_mixed_decimals_6_to_18(v1_three_coin_mixed_state_reverse(), 0.99)]
+    #[case::ng_dynamic_fee(ng_dynamic_fee_state(), 0.99)]
+    #[case::ng_dynamic_fee_mid(ng_dynamic_fee_state(), 0.999)]
+    #[case::meta_virtual_price(meta_state(), 0.99)]
+    #[case::meta_virtual_price_mid(meta_state(), 0.999)]
+    fn test_query_pool_swap_numerical_comparison(
+        #[case] setup: (CurveState, Token, Token),
+        #[case] multiplier: f64,
+    ) {
+        let (state, token_in, token_out) = setup;
+        let (params, target_f64) = spot_target_params(&state, &token_in, &token_out, multiplier);
+
+        let native = state
+            .query_pool_swap(&params)
+            .expect("native query_pool_swap");
+        let numerical = crate::evm::query_pool_swap::query_pool_swap(&state, &params)
+            .expect("numerical query_pool_swap");
+
+        for (label, swap, band) in
+            [("native", &native, TOLERANCE / 2.0), ("numerical", &numerical, 5.0 * TOLERANCE)]
+        {
+            assert!(swap.amount_in() > &BigUint::ZERO, "{label} amount_in should be > 0");
+            let new_spot = swap
+                .new_state()
+                .spot_price(&token_in, &token_out)
+                .expect("post-swap spot");
+            let error = (new_spot - target_f64) / target_f64;
+            assert!(
+                error >= -1e-12,
+                "{label} post-swap spot {new_spot} fell below target {target_f64}"
+            );
+            assert!(
+                error <= band,
+                "{label} post-swap spot {new_spot} outside band of target {target_f64}: {error}"
+            );
+        }
+    }
+
+    /// CryptoSwap pools delegate to the numerical search. That search rejects every target,
+    /// because `get_amount_out` keeps the stored `D` (no `tweak_price` port).
+    #[test]
+    fn test_crypto_variant_delegates_to_numerical() {
+        let (state, token_in, token_out) = two_crypto_ng_state();
+        let (params, _) = spot_target_params(&state, &token_in, &token_out, 0.995);
+
+        let result = state.query_pool_swap(&params);
+        let Err(SimulationError::InvalidInput(msg, _)) = result else {
+            panic!("crypto pools must delegate to the numerical search, got {result:?}");
+        };
+        assert!(msg.contains("< limit"), "expected the numerical search's limit error, got: {msg}");
+    }
+
+    #[test]
+    fn test_query_pool_swap_target_wider_than_u256() {
+        let (state, token_in, token_out) = v1_two_coin_state();
+        let (params, target_f64) = spot_target_params(&state, &token_in, &token_out, 0.999);
+        let SwapConstraint::PoolTargetPrice { target, .. } = params.swap_constraint() else {
+            panic!("spot_target_params builds a PoolTargetPrice constraint");
+        };
+        let scale = BigUint::from(1u8) << 256;
+        let wide_target = Price::new(&target.numerator * &scale, &target.denominator * &scale);
+        let params = target_price_params(&token_in, &token_out, wide_target, TOLERANCE);
+
+        let swap = state
+            .query_pool_swap(&params)
+            .expect("numerical query_pool_swap");
+
+        assert!(swap.price_points().is_some(), "only the numerical search returns price points");
+        let new_spot = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .expect("post-swap spot");
+        let error = (new_spot - target_f64) / target_f64;
+        assert!(
+            (-1e-12..=5.0 * TOLERANCE).contains(&error),
+            "post-swap spot {new_spot} missed {target_f64}"
+        );
+    }
+
+    #[test]
+    fn test_trade_limit_price_delegates_to_numerical() {
+        let (state, token_in, token_out) = v1_two_coin_state();
+        let spot = state
+            .spot_price(&token_in, &token_out)
+            .expect("spot price");
+        let limit_f64 = spot * 0.999;
+        let params = QueryPoolSwapParams::new(
+            token_in.clone(),
+            token_out.clone(),
+            SwapConstraint::TradeLimitPrice {
+                limit: to_price(limit_f64, &token_in, &token_out),
+                tolerance: TOLERANCE,
+                min_amount_in: None,
+                max_amount_in: None,
+            },
+        );
+
+        let swap = state
+            .query_pool_swap(&params)
+            .expect("trade limit query_pool_swap");
+        assert!(swap.amount_in() > &BigUint::ZERO);
+        assert!(swap.amount_out() > &BigUint::ZERO);
+        let trade_price = swap
+            .amount_out()
+            .to_f64()
+            .expect("failed to convert the output amount to f64") /
+            swap.amount_in()
+                .to_f64()
+                .expect("failed to convert the input amount to f64");
+        assert!(trade_price >= limit_f64, "trade price {trade_price} violates limit {limit_f64}");
+    }
+
+    #[rstest]
+    #[case::above_spot(1.01, "is above spot price")]
+    #[case::below_limit(0.01, "below reachable limit for curve pool")]
+    fn test_query_pool_swap_unreachable_target(#[case] multiplier: f64, #[case] expected: &str) {
+        let (state, token_in, token_out) = v1_two_coin_state();
+        let (params, _) = spot_target_params(&state, &token_in, &token_out, multiplier);
+
+        let result = state.query_pool_swap(&params);
+        let Err(SimulationError::InvalidInput(msg, _)) = result else {
+            panic!("expected InvalidInput, got {result:?}");
+        };
+        assert!(msg.contains(expected), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn test_query_pool_swap_target_equal_to_spot() {
+        let (state, token_in, token_out) = v1_two_coin_state();
+        let i = state
+            .coin_index(&token_in.address)
+            .expect("token_in index");
+        let j = state
+            .coin_index(&token_out.address)
+            .expect("token_out index");
+        let (num, den) = state
+            .pool
+            .spot_price(i, j)
+            .expect("pool spot price");
+        let target = Price::new(u256_to_biguint(num), u256_to_biguint(den));
+        let params = target_price_params(&token_in, &token_out, target, TOLERANCE);
+
+        let swap = state
+            .query_pool_swap(&params)
+            .expect("query_pool_swap at spot");
+        assert_eq!(swap.amount_in(), &BigUint::ZERO);
+        assert_eq!(swap.amount_out(), &BigUint::ZERO);
     }
 }
