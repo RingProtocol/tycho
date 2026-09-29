@@ -68,14 +68,20 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("ethereum-sushiswap-v2", "ethereum-uniswap-v2"),
         ("base-sushiswap-v2", "ethereum-uniswap-v2"),
         ("ethereum-pancakeswap-v2", "ethereum-uniswap-v2"),
+        ("arc-uniswap-v2", "ethereum-uniswap-v2"),
+        ("arc-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("arc-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
         ("base-balancer-v3", "ethereum-balancer-v3"),
         ("arbitrum-balancer-v3", "ethereum-balancer-v3"),
         ("gnosis-balancer-v3", "ethereum-balancer-v3"),
         ("base-alienbase-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-sushiswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("robinhood-robinswap-v3", "ethereum-uniswap-v3-logs-only"),
+        ("robinhood-gigadex-v3", "ethereum-pancakeswap-v3"),
         ("unichain-curve", "ethereum-curve"),
         ("robinhood-ramses-v3", "polygon-ramses-v3"),
+        ("robinhood-ekubo-v3", "ethereum-ekubo-v3"),
+        ("robinhood-up-v3", "base-aerodrome-slipstreams"),
     ])
 });
 
@@ -1159,12 +1165,6 @@ impl TestRunner {
                 .ok_or_else(|| miette!("Couldn't find protocol component {id}"))?;
 
             let tokens = component.tokens.clone();
-            let formatted_token_str = format!("{:}/{:}", tokens[0].symbol, tokens[1].symbol);
-            state
-                .spot_price(&tokens[0], &tokens[1])
-                .map(|price| info!("[{}] Spot price {:?}: {:?}", id, formatted_token_str, price))
-                .into_diagnostic()
-                .wrap_err(format!("Error calculating spot price for Pool {id:?}."))?;
 
             // Test get_amount_out with different percentages of limits. The reserves or limits
             // are relevant because we need to know how much to test with. We
@@ -1181,6 +1181,8 @@ impl TestRunner {
                 .map(|perm| (perm[0], perm[1]))
                 .collect();
 
+            let mut quoted_any_direction = false;
+
             for (token_in, token_out) in &swap_directions {
                 let (max_input, max_output) = state
                     .get_limits(token_in.address.clone(), token_out.address.clone())
@@ -1193,6 +1195,36 @@ impl TestRunner {
                 info!(
                     "[{}] Retrieved limits. | Max input: {max_input} {} | Max output: {max_output} {}",
                     id, token_in.symbol, token_out.symbol
+                );
+
+                // A zero limit means the venue does not quote this direction at all - a
+                // one-directional component such as ETH -> stETH staking, or a redemption
+                // rate limit with no capacity at this block. Skip the direction instead of
+                // failing the component; the guard below still requires that at least one
+                // direction was exercised.
+                if max_input.is_zero() {
+                    warn!(
+                        "[{}] Zero limit for {} -> {}, skipping direction",
+                        id, token_in.symbol, token_out.symbol
+                    );
+                    continue;
+                }
+
+                // Priced per direction rather than once per component: consumers key their
+                // price data by swap direction, so a venue that quotes only one ordering
+                // leaves them without a price for a direction that does trade. Asked after
+                // the zero-limit skip, so a direction the venue does not trade is not
+                // required to have a price either.
+                let spot_price = state
+                    .spot_price(token_in, token_out)
+                    .into_diagnostic()
+                    .wrap_err(format!(
+                        "Error calculating spot price for Pool {id:?} for in token: {}, and out token: {}",
+                        token_in.address, token_out.address
+                    ))?;
+                info!(
+                    "[{}] Spot price {}/{}: {:?}",
+                    id, token_in.symbol, token_out.symbol, spot_price
                 );
 
                 for percentage in percentages.iter() {
@@ -1227,6 +1259,8 @@ impl TestRunner {
                             token_out.symbol,
                             amount_out_result.gas
                         );
+
+                    quoted_any_direction = true;
 
                     if skip_execution.contains(id) {
                         info!("Skipping execution for component {id}");
@@ -1271,6 +1305,12 @@ impl TestRunner {
                         },
                     );
                 }
+            }
+
+            if !quoted_any_direction {
+                return Err(miette!(
+                    "No tradable direction for pool {id}: every swap direction reported a zero limit."
+                ));
             }
         }
 
@@ -1333,53 +1373,20 @@ impl TestRunner {
         let rpc_tools = RPCTools::new(self.rpc_provider.url.as_ref(), &chain_model).await?;
 
         // Prepare router overwrites data
-        let router_overwrites_data = execution::create_router_overwrites_data(protocol_system)?;
+        let router_overwrites_data =
+            execution::create_router_overwrites_data(self.chain, protocol_system)?;
 
-        info!("Executing {} simulations in batches ...", filtered_execution_data.len());
+        info!("Executing {} simulations ...", filtered_execution_data.len());
 
-        // Split execution data into smaller batches to avoid RPC request size limits
-        // This happens because our overwrites are colossal
-        const BATCH_SIZE: usize = 30;
-        let execution_batches: Vec<HashMap<String, TychoExecutionInput>> = filtered_execution_data
-            .clone()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .chunks(BATCH_SIZE)
-            .map(|chunk| chunk.iter().cloned().collect())
-            .collect();
-
-        let mut all_results = HashMap::new();
-
-        // Process each batch sequentially
-        for (batch_index, batch) in execution_batches.iter().enumerate() {
-            info!(
-                "Processing execution batch {} of {} ({} simulations)",
-                batch_index + 1,
-                execution_batches.len(),
-                batch.len()
-            );
-
-            let batch_results = simulate_swap_transaction(
-                &rpc_tools,
-                batch.clone(),
-                block,
-                router_overwrites_data.clone(),
-                None,
-            )
-            .await;
-
-            let batch_results = match batch_results {
-                Ok(results) => results,
-                Err((error, _, _)) => {
-                    error!("Batch {} failed: {:#}", batch_index + 1, error);
-                    return Err(error);
-                }
-            };
-
-            all_results.extend(batch_results);
-        }
-
-        let results = all_results;
+        let results = simulate_swap_transaction(
+            &rpc_tools,
+            filtered_execution_data.clone(),
+            block,
+            router_overwrites_data,
+            None,
+        )
+        .await
+        .map_err(|(error, _, _)| error)?;
 
         let mut success_count = 0;
         let mut failure_count = 0;
@@ -1614,6 +1621,76 @@ mod tests {
                 println!("{error:#}");
             }
             panic!("One or more config files failed to parse.");
+        }
+    }
+
+    #[test]
+    fn arc_uniswap_packages_use_shared_packages_and_arc_manifests() {
+        let root_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("protocols/testing must live below protocols")
+            .to_path_buf();
+
+        for (protocol, base_protocol, config_file_name, manifest_path) in [
+            (
+                "arc-uniswap-v2",
+                "ethereum-uniswap-v2",
+                "integration_test_arc_uniswap_v2.tycho.yaml",
+                "./arc-uniswap-v2.yaml",
+            ),
+            (
+                "arc-uniswap-v3",
+                "ethereum-uniswap-v3-logs-only",
+                "integration_test_arc_uniswap_v3.tycho.yaml",
+                "./arc-uniswap-v3.yaml",
+            ),
+            (
+                "arc-uniswap-v4-no-hooks",
+                "ethereum-uniswap-v4/no-hooks",
+                "integration_test_arc_uniswap_v4_no_hooks.tycho.yaml",
+                "./arc-uniswap-v4-no-hooks.yaml",
+            ),
+        ] {
+            let runner = TestRunner::new(RunnerConfig {
+                test_type: TestType::Range(TestTypeRange { match_test: None }),
+                root_path: root_path.clone(),
+                chain: Chain::Arc,
+                protocol: protocol.to_string(),
+                db_url: String::new(),
+                rpc_url: "http://localhost:8545".to_string(),
+                tycho_server_port: 4242,
+                vm_simulation_traces: false,
+                reuse_last_sync: false,
+                prebuilt_wasm: false,
+            })
+            .expect("Arc package resolution must produce a runner");
+
+            assert!(
+                runner
+                    .substreams_path
+                    .ends_with(PathBuf::from("substreams").join(base_protocol)),
+                "unexpected shared package for {protocol}",
+            );
+            assert!(
+                runner
+                    .config_file_path
+                    .ends_with(config_file_name),
+                "unexpected config file for {protocol}",
+            );
+
+            let config = TestRunner::parse_config(&runner.config_file_path)
+                .expect("Arc integration test configuration must parse");
+            assert_eq!(
+                config.substreams_yaml_path, manifest_path,
+                "unexpected manifest for {protocol}",
+            );
+            assert!(
+                runner
+                    .substreams_path
+                    .join(config.substreams_yaml_path)
+                    .is_file(),
+                "manifest must exist for {protocol}",
+            );
         }
     }
 

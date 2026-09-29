@@ -365,6 +365,11 @@ impl RFQClient for HashflowClient {
         params: &GetAmountOutParams,
     ) -> Result<SignedQuote, RFQError> {
         let hashflow_chain = HashflowChain::from(self.chain);
+        // A fresh random address becomes the quote's effectiveTrader — the address Hashflow
+        // scopes its strictly increasing quote nonces to — so quotes never invalidate each
+        // other, at the cost of a cold nonce storage slot on Hashflow's router (~17k gas per
+        // swap). The receiver executes the trade on-chain, so it is Hashflow's trader.
+        let effective_trader = Bytes::from(Address::random().to_vec());
         let quote_request = HashflowQuoteRequest {
             source: self.auth_user.clone(),
             base_chain: hashflow_chain.clone(),
@@ -375,7 +380,7 @@ impl RFQClient for HashflowClient {
                 base_token_amount: Some(params.amount_in.to_string()),
                 quote_token_amount: None,
                 trader: params.receiver.to_string(),
-                effective_trader: None,
+                effective_trader: Some(effective_trader.to_string()),
             }],
             calldata: false,
         };
@@ -507,7 +512,7 @@ impl RFQClient for HashflowClient {
                         }
                         // We assume there will be only one quote request at a time
                         let quote = quotes[0].clone();
-                        quote.validate(params)?;
+                        quote.validate(params, &effective_trader)?;
 
                         let mut quote_attributes: HashMap<String, Bytes> = HashMap::new();
                         quote_attributes.insert("pool".to_string(), quote.quote_data.pool);
@@ -525,6 +530,8 @@ impl RFQClient for HashflowClient {
                             );
                         }
                         quote_attributes.insert("trader".to_string(), quote.quote_data.trader);
+                        quote_attributes
+                            .insert("effective_trader".to_string(), effective_trader.clone());
                         quote_attributes
                             .insert("base_token".to_string(), quote.quote_data.base_token);
                         quote_attributes
@@ -847,11 +854,12 @@ mod tests {
         // // Assuming the BTC - WETH price doesn't change too much at the time of running this
         assert!(quote.amount_out > BigUint::from(3000000u64));
 
-        assert_eq!(quote.quote_attributes.len(), 11);
+        assert_eq!(quote.quote_attributes.len(), 12);
         let expected_attributes = [
             "pool",
             "external_account",
             "trader",
+            "effective_trader",
             "base_token",
             "quote_token",
             "base_token_amount",
@@ -878,21 +886,77 @@ mod tests {
         );
     }
 
-    /// Helper function to create a mock server that responds after a delay
-    async fn create_delayed_response_server(delay_ms: u64) -> std::net::SocketAddr {
+    /// Response template; the mock server replaces `{{EFFECTIVE_TRADER}}` with the address the
+    /// request carried, echoing it like the real API.
+    const QUOTE_RESPONSE: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"{{EFFECTIVE_TRADER}}","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
+
+    const QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER: &str = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
+
+    /// Reads one HTTP request off the stream and returns its body.
+    async fn read_request_body(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).await.unwrap();
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw);
+            if let Some(header_end) = text.find("\r\n\r\n") {
+                let content_length: usize = text
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= header_end + 4 + content_length {
+                    return text[header_end + 4..].to_string();
+                }
+            }
+            if n == 0 {
+                return String::new();
+            }
+        }
+    }
+
+    /// Extracts the effectiveTrader value from a request body.
+    fn effective_trader_of(request_body: &str) -> String {
+        let start = request_body
+            .find("\"effectiveTrader\":\"")
+            .expect("request carries no effectiveTrader") +
+            "\"effectiveTrader\":\"".len();
+        request_body[start..start + request_body[start..].find('"').unwrap()].to_string()
+    }
+
+    /// Creates a mock server that answers with `json_response` after a delay, substituting the
+    /// request's effectiveTrader for `{{EFFECTIVE_TRADER}}`. Returns the address and a log of
+    /// the received request bodies.
+    async fn create_delayed_response_server(
+        delay_ms: u64,
+        json_response: &'static str,
+    ) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::sync::{Arc, Mutex};
+
         use tokio::{io::AsyncWriteExt, net::TcpListener};
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
-
-        let json_response = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
+        let request_log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let request_log_server = request_log.clone();
 
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let json_response_clone = json_response.to_owned();
+                let request_log = request_log_server.clone();
                 tokio::spawn(async move {
+                    let body = read_request_body(&mut stream).await;
+                    let json_response_clone = json_response_clone
+                        .replace("{{EFFECTIVE_TRADER}}", &effective_trader_of(&body));
+                    request_log.lock().unwrap().push(body);
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -909,7 +973,7 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        addr
+        (addr, request_log)
     }
 
     fn create_test_hashflow_client(
@@ -950,8 +1014,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_binding_quote_without_effective_trader() {
+        // A response that drops the requested effectiveTrader would leave the quote in the
+        // trader's shared nonce scope, so the client rejects it.
+        let (addr, _) =
+            create_delayed_response_server(0, QUOTE_RESPONSE_WITHOUT_EFFECTIVE_TRADER).await;
+        let client = create_test_hashflow_client(
+            format!("http://127.0.0.1:{}/rfq", addr.port()),
+            Duration::from_secs(1),
+        );
+        let params = create_test_quote_params();
+
+        let err = client
+            .request_binding_quote(&params)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:?}").contains("Effective trader mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_request_binding_quote_field_mapping() {
+        // The wire request carries the receiver as Hashflow's trader and a fresh random
+        // address as the effectiveTrader — a new one per quote request.
+        let (addr, request_log) = create_delayed_response_server(0, QUOTE_RESPONSE).await;
+        let client = create_test_hashflow_client(
+            format!("http://127.0.0.1:{}/rfq", addr.port()),
+            Duration::from_secs(1),
+        );
+        let params = create_test_quote_params();
+
+        let first_quote = client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+        client
+            .request_binding_quote(&params)
+            .await
+            .unwrap();
+
+        let requests = request_log.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for body in requests.iter() {
+            assert!(
+                body.contains(&format!("\"trader\":\"{}\"", params.receiver)),
+                "trader is not the receiver: {body}"
+            );
+        }
+        let first = effective_trader_of(&requests[0]);
+        let second = effective_trader_of(&requests[1]);
+        assert_eq!(first.len(), 42, "effective trader is not an address");
+        assert_ne!(first, second, "effective traders are not unique per quote");
+        assert_ne!(first, params.receiver.to_string(), "effective trader equals the trader");
+        assert_eq!(
+            first_quote
+                .quote_attributes
+                .get("effective_trader")
+                .unwrap()
+                .to_string(),
+            first,
+            "quote attributes do not carry the requested effective trader"
+        );
+    }
+
+    #[tokio::test]
     async fn test_hashflow_quote_timeout() {
-        let addr = create_delayed_response_server(500).await;
+        let (addr, _) = create_delayed_response_server(500, QUOTE_RESPONSE).await;
 
         // Test 1: Client with short timeout (200ms) - should timeout
         let client_short_timeout = create_test_hashflow_client(
@@ -1015,27 +1143,27 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let json_response = r#"{"status":"success","error":null,"rfqId":"test-rfq-id","internalRfqIds":null,"quotes":[{"quoteData":{"pool":"0x71D9750ECF0c5081FAE4E3EDC4253E52024b0B59","externalAccount":null,"trader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","effectiveTrader":"0xfD0b31d2E955fA55e3fa641Fe90e08b677188d35","baseToken":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","baseTokenAmount":"1000000000000000000","quoteToken":"0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599","quoteTokenAmount":"3329502","quoteExpiry":1707847360,"nonce":1707844960943648659,"txid":"0x0000000000000000000000000000000000000000000000000000000000000001"},"signature":"0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12"}]}"#;
-
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let count_clone = request_count_clone.clone();
-                let json_response_clone = json_response.to_owned();
                 tokio::spawn(async move {
                     *count_clone.lock().unwrap() += 1;
                     let count = *count_clone.lock().unwrap();
                     println!("Mock server: Received request #{count}");
 
+                    let body = read_request_body(&mut stream).await;
                     if count <= 2 {
                         let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nInternal Server Error";
                         let _ = stream
                             .write_all(response.as_bytes())
                             .await;
                     } else {
+                        let json_response = QUOTE_RESPONSE
+                            .replace("{{EFFECTIVE_TRADER}}", &effective_trader_of(&body));
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            json_response_clone.len(),
-                            json_response_clone
+                            json_response.len(),
+                            json_response
                         );
                         let _ = stream
                             .write_all(response.as_bytes())

@@ -23,11 +23,11 @@ use tycho_common::{
 
 use super::pool::{
     concentrated::ConcentratedPool, full_range::FullRangePool, oracle::OraclePool,
-    twamm::TwammPool, EkuboPool,
+    twamm::TwammPool, ve33::Ve33Pool, EkuboPool, EkuboPoolQuote,
 };
 use crate::evm::protocol::{
     ekubo_v3::{
-        addresses::SIGNED_EXCLUSIVE_SWAP_ADDRESS,
+        addresses::SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS,
         pool::{
             boosted_fees::BoostedFeesPool, mev_capture::MevCapturePool, stableswap::StableswapPool,
         },
@@ -53,6 +53,7 @@ pub enum EkuboV3State {
     Twamm(TwammPool),
     MevCapture(MevCapturePool),
     BoostedFees(BoostedFeesPool),
+    Ve33(Ve33Pool),
 }
 
 fn sqrt_price_q128_to_f64(
@@ -67,8 +68,14 @@ fn sqrt_price_q128_to_f64(
 
 impl EkuboV3State {
     /// Zero unless the extension forces the swap through `Core.forward`.
+    ///
+    /// The pool key carries no chain, so a SignedExclusiveSwap address from any deployment counts.
     fn forward_overhead_gas(&self) -> u64 {
-        if self.key().config.extension == SIGNED_EXCLUSIVE_SWAP_ADDRESS {
+        let extension = self.key().config.extension;
+        if SIGNED_EXCLUSIVE_SWAP_DEPLOYMENTS
+            .iter()
+            .any(|(_, deployment)| *deployment == extension)
+        {
             SIGNED_EXCLUSIVE_SWAP_GAS
         } else {
             0
@@ -79,7 +86,11 @@ impl EkuboV3State {
 #[typetag::serde]
 impl ProtocolSim for EkuboV3State {
     fn fee(&self) -> f64 {
-        self.key().config.fee as f64 / (2f64.powi(64))
+        let fee = match self {
+            Self::Ve33(pool) => pool.swap_fee(),
+            _ => self.key().config.fee,
+        };
+        fee as f64 / (2f64.powi(64))
     }
 
     fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {

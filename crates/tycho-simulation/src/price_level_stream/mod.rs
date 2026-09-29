@@ -46,20 +46,11 @@
 //! address (e.g. `pricelevelstream:0x5979…`). The prefix keeps these components distinct from
 //! those any other integration path may produce for the same venue (e.g. `vm:fermiswap`).
 //!
-//! Venues on Titan's PropAMMRouter whitelist are emitted under `propammfallback:{pamm}` instead:
-//! tycho-execution routes their swaps through the router, which falls back to a single-hop
-//! Uniswap V3 pool when the venue reverts. The whitelist is read through the node at
-//! [`fallback_router_rpc_url`](stream::PriceLevelStreamBuilder::fallback_router_rpc_url) or
-//! `RPC_URL`, each read bounded by a timeout, retried with backoff until it succeeds, and
-//! re-read every
-//! [`whitelist_refresh_interval`](stream::PriceLevelStreamBuilder::whitelist_refresh_interval).
-//! Nothing is served until the first read succeeds, and
-//! [`build`](stream::PriceLevelStreamBuilder::build) fails without a node URL or with one that
-//! does not parse, so a misconfigured deployment never silently serves whitelisted venues under
-//! the direct family, which has no Uniswap V3 fallback. A venue whose membership changes is
-//! removed at once and re-added under its new family by the next frame carrying it.
-//! [`without_fallback_router`](stream::PriceLevelStreamBuilder::without_fallback_router) skips
-//! the read and keeps every venue on the direct path unconditionally.
+//! By default components are emitted under `fallback:{pamm}` instead: tycho-execution routes
+//! their swaps through `TychoFallbackRouter`, which retries a reverted pAMM swap on the fallback
+//! pool the solver names.
+//! [`without_fallback_router`](stream::PriceLevelStreamBuilder::without_fallback_router) keeps
+//! every venue on the direct `pricelevelstream:` path.
 //!
 //! Distinct identifiers do not imply distinct liquidity, though: a venue served here may also be
 //! integrated through another path, in which case the components of both paths price the same
@@ -72,10 +63,10 @@
 //!
 //! The stream emits `price_level_stream_*` metrics through the `metrics` facade (frames
 //! accepted and rejected by reason, the age of every accepted frame, last seen timestamp and
-//! served components per registered venue, stale removals, serving state, reconnects, whitelist
-//! reads); a consumer that installs a `metrics` recorder receives them with no further setup.
-//! Per-venue series start at zero for every registered venue, and no label ever carries a value
-//! from the wire, except the venue address itself when a pAMM is served under auto-detection.
+//! served components per registered venue, stale removals, serving state, reconnects); a
+//! consumer that installs a `metrics` recorder receives them with no further setup. Per-venue
+//! series start at zero for every registered venue, and no label ever carries a value from the
+//! wire, except the venue address itself when a pAMM is served under auto-detection.
 //!
 //! Label values and gauge encodings, for dashboards and alerts:
 //! - `price_level_stream_frame_age_seconds`: a histogram of the wall-clock age of every accepted
@@ -85,8 +76,7 @@
 //!   `out_of_order`, `block_regression`, `block_jump`.
 //! - `price_level_stream_reconnects_total{reason}`: `idle_timeout`, `ended`, `closed`,
 //!   `read_error`, `connect_failed`, `connect_timeout`.
-//! - `price_level_stream_whitelist_reads_total{outcome}`: `ok`, `error`.
-//! - `price_level_stream_serving_state`: 0 = awaiting whitelist, 1 = unserved, 2 = serving.
+//! - `price_level_stream_serving_state`: 0 = unserved, 1 = serving.
 //! - `venue` on `price_level_stream_last_seen_timestamp_seconds`,
 //!   `price_level_stream_served_components` and `price_level_stream_stale_removals_total`: the
 //!   registered venue name, or the address of an auto-detected venue.
@@ -102,7 +92,6 @@
 use std::time::Duration;
 
 pub mod config;
-pub mod fallback_router;
 pub mod state;
 pub mod stream;
 mod telemetry;
@@ -115,7 +104,7 @@ mod tracker;
 const SLOT: Duration = Duration::from_secs(12);
 
 /// The delay before the retry after `attempt` consecutive failures: `2^attempt` seconds, capped
-/// at `max_backoff`. Shared by the Titan reconnect and the whitelist read retry.
+/// at `max_backoff`.
 fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
     let exponential = 2u64
         .checked_pow(attempt)

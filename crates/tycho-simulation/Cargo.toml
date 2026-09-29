@@ -20,6 +20,7 @@ exclude = [
 ignored = ["ruint"]
 
 [dependencies]
+base64 = { workspace = true }
 # Serialization/Deserialization
 chrono = { workspace = true }
 hex = { workspace = true }
@@ -121,14 +122,7 @@ criterion = "0.8.2"
 [features]
 default = ["evm", "rfq", "price-level-stream"]
 network_tests = []
-price-level-stream = [
-    "dep:async-stream",
-    "dep:metrics",
-    "dep:tokio-tungstenite",
-    # The PropAMMRouter whitelist read (`price_level_stream::fallback_router`).
-    "dep:alloy",
-    "dep:reqwest",
-]
+price-level-stream = ["dep:async-stream", "dep:metrics", "dep:tokio-tungstenite"]
 evm = [
     "dep:foundry-block-explorers",
     "dep:revm",

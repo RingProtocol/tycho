@@ -34,8 +34,11 @@ const deploy_protocols = {
         "vm:bopamm",
         "rfq:metric",
         "pricelevelstream",
-        "propammfallback",
+        "rfq:native",
         "sky",
+        "lido_v4",
+        "etherfi",
+        "fallback",
     ],
     "base": [
         "uniswap_v2",
@@ -47,6 +50,8 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "rfq:metric",
+        "rfq:native",
+        "fallback",
     ],
     "unichain": [
         "uniswap_v2",
@@ -62,6 +67,7 @@ const deploy_protocols = {
         "uniswap_v4",
         "native_wrapper",
         "rfq:metric",
+        "rfq:native"
     ],
     "polygon": [
         "uniswap_v2",
@@ -77,6 +83,7 @@ const deploy_protocols = {
         "uniswap_v4",
         "native_wrapper",
         "rfq:metric",
+        "rfq:native"
     ],
     "plasma": [
         "uniswap_v3",
@@ -88,7 +95,10 @@ const deploy_protocols = {
         "uniswap_v2",
         "uniswap_v3",
         "uniswap_v4",
+        "ekubo_v3",
         "native_wrapper",
+        "rfq:metric",
+        "rfq:native",
     ],
 };
 

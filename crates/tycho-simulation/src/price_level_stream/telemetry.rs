@@ -25,19 +25,14 @@ pub(super) const SERVED_COMPONENTS: &str = "price_level_stream_served_components
 /// Counter, label `venue`. Incremented once per component that turns stale at its `stale_at`
 /// deadline and is emitted in `removed_pairs`. `venue` is as on `LAST_SEEN`.
 pub(super) const STALE_REMOVALS: &str = "price_level_stream_stale_removals_total";
-/// Gauge, no labels. The stream's serving state as a [`ServingState`] number: 0 = awaiting the
-/// whitelist, 1 = unserved, 2 = serving.
+/// Gauge, no labels. The stream's serving state as a [`ServingState`] number: 0 = unserved,
+/// 1 = serving.
 pub(super) const SERVING_STATE: &str = "price_level_stream_serving_state";
 /// Counter, label `reason`, one of [`ReconnectReason`]. Incremented once per Titan connection
 /// the stream gives up on, or fails to establish, before backing off.
 pub(super) const RECONNECTS: &str = "price_level_stream_reconnects_total";
-/// Counter, label `outcome`, one of [`ReadOutcome`]. Incremented once per PropAMMRouter
-/// whitelist read.
-pub(super) const WHITELIST_READS: &str = "price_level_stream_whitelist_reads_total";
-/// Gauge, no labels. The number of venues on the whitelist as of the last successful read.
-pub(super) const WHITELISTED_VENUES: &str = "price_level_stream_whitelisted_venues";
 /// Counter, no labels. Incremented once per pAMM entry in an accepted frame that names a venue
-/// which is neither registered nor denied while auto-detection is off.
+/// which is neither registered nor served under auto-detection.
 pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
     "price_level_stream_unregistered_pamm_entries_total";
 
@@ -102,33 +97,13 @@ impl ReconnectReason {
     }
 }
 
-/// The `outcome` label of [`WHITELIST_READS`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ReadOutcome {
-    /// The read returned a whitelist.
-    Ok,
-    /// The `eth_call` failed, returned undecodable data, or timed out.
-    Error,
-}
-
-impl ReadOutcome {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            ReadOutcome::Ok => "ok",
-            ReadOutcome::Error => "error",
-        }
-    }
-}
-
 /// The stream's serving state, exported as the numeric value of `SERVING_STATE`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ServingState {
-    /// The PropAMMRouter whitelist has not been read yet; nothing is served.
-    AwaitingWhitelist = 0,
-    /// The whitelist is known or not needed, and no component is served.
-    Unserved = 1,
+    /// No component is served.
+    Unserved = 0,
     /// At least one component is served.
-    Serving = 2,
+    Serving = 1,
 }
 
 pub(super) fn record_frame_accepted() {
@@ -161,14 +136,6 @@ pub(super) fn record_serving_state(state: ServingState) {
 
 pub(super) fn record_reconnect(reason: ReconnectReason) {
     counter!(RECONNECTS, "reason" => reason.as_str()).increment(1);
-}
-
-pub(super) fn record_whitelist_read(outcome: ReadOutcome) {
-    counter!(WHITELIST_READS, "outcome" => outcome.as_str()).increment(1);
-}
-
-pub(super) fn record_whitelisted_venues(count: usize) {
-    gauge!(WHITELISTED_VENUES).set(count as f64);
 }
 
 pub(super) fn record_unregistered_pamm() {
@@ -285,8 +252,6 @@ mod tests {
             record_stale_removal("fermiswap");
             record_serving_state(ServingState::Serving);
             record_reconnect(ReconnectReason::IdleTimeout);
-            record_whitelist_read(ReadOutcome::Ok);
-            record_whitelisted_venues(5);
             record_unregistered_pamm();
         });
         assert_eq!(counter_value(&snapshot, "price_level_stream_frames_accepted_total", &[]), 1);
@@ -326,7 +291,7 @@ mod tests {
             ),
             1
         );
-        assert_eq!(gauge_value(&snapshot, "price_level_stream_serving_state", &[]), 2.0);
+        assert_eq!(gauge_value(&snapshot, "price_level_stream_serving_state", &[]), 1.0);
         assert_eq!(
             counter_value(
                 &snapshot,
@@ -335,15 +300,6 @@ mod tests {
             ),
             1
         );
-        assert_eq!(
-            counter_value(
-                &snapshot,
-                "price_level_stream_whitelist_reads_total",
-                &[("outcome", "ok")]
-            ),
-            1
-        );
-        assert_eq!(gauge_value(&snapshot, "price_level_stream_whitelisted_venues", &[]), 5.0);
         assert_eq!(
             counter_value(&snapshot, "price_level_stream_unregistered_pamm_entries_total", &[]),
             1
@@ -375,7 +331,7 @@ mod tests {
         .into_iter()
         .map(ReconnectReason::as_str)
         .collect();
-        for values in [reject, reconnect, vec!["ok", "error"]] {
+        for values in [reject, reconnect] {
             let distinct: std::collections::HashSet<&str> = values.iter().copied().collect();
             assert_eq!(distinct.len(), values.len(), "{values:?}");
         }

@@ -89,8 +89,6 @@ struct ServedComponent {
     component: ProtocolComponent,
     /// The venue name, for logs and metric labels.
     venue_name: String,
-    /// The venue address, for whitelist membership checks.
-    venue_address: Bytes,
     /// The instant this component's data turns `stale_after` old.
     stale_at: Instant,
 }
@@ -107,11 +105,7 @@ struct Frontier {
 /// The stream's serving state.
 #[derive(Clone, Copy)]
 enum ServingState {
-    /// The PropAMMRouter whitelist has not been read yet: the family of every component is
-    /// unknown, so frames are validated but nothing is emitted.
-    AwaitingWhitelist,
-    /// Whitelist known (or not needed) and nothing served: at start, and whenever the last
-    /// served component turned stale.
+    /// Nothing served: at start, and whenever the last served component turned stale.
     Unserved,
     /// At least one component is served. `deadline` is the earliest `stale_at` among them and
     /// `frontier` the newest accepted frame. Both exist only in this state, so a frame accepted
@@ -122,20 +116,10 @@ enum ServingState {
 impl ServingState {
     fn telemetry_state(self) -> telemetry::ServingState {
         match self {
-            ServingState::AwaitingWhitelist => telemetry::ServingState::AwaitingWhitelist,
             ServingState::Unserved => telemetry::ServingState::Unserved,
             ServingState::Serving { deadline: _, frontier: _ } => telemetry::ServingState::Serving,
         }
     }
-}
-
-/// How the tracker learns the PropAMMRouter whitelist.
-pub(super) enum Whitelist {
-    /// Delivered later through [`FreshnessTracker::on_whitelist_read`]; nothing is served until
-    /// then.
-    Awaited,
-    /// Never read: every venue stays on the direct family.
-    NotUsed,
 }
 
 /// What a [`FreshnessTracker`] is built from.
@@ -153,7 +137,9 @@ pub(super) struct TrackerSettings {
     /// How long a component stays served after the last accepted frame that carried it; see
     /// [`DEFAULT_STALE_AFTER`].
     pub stale_after: Duration,
-    pub whitelist: Whitelist,
+    /// Whether components are emitted under the `fallback:` family, so their swaps execute
+    /// through `TychoFallbackRouter` instead of the venue directly.
+    pub via_fallback_router: bool,
     /// Whether every emitted state refuses to quote once its frame is [`QUOTE_TTL`] old.
     pub quote_guard: bool,
 }
@@ -168,10 +154,8 @@ pub(super) struct FreshnessTracker {
     auto_detect: bool,
     auto_detected_gas_cost: BigUint,
     stale_after: Duration,
+    via_fallback_router: bool,
     quote_guard: bool,
-    /// Venues whose components are emitted under the `propammfallback:` family, so their swaps
-    /// execute through Titan's PropAMMRouter instead of the venue directly.
-    router_venues: HashSet<Bytes>,
     /// The components currently served, keyed by component id.
     served: HashMap<String, ServedComponent>,
     /// The stream's serving state; holds the block frontier and drives
@@ -198,14 +182,10 @@ impl FreshnessTracker {
             auto_detect,
             auto_detected_gas_cost,
             stale_after,
-            whitelist,
+            via_fallback_router,
             quote_guard,
         } = settings;
-        let serving_state = match whitelist {
-            Whitelist::Awaited => ServingState::AwaitingWhitelist,
-            Whitelist::NotUsed => ServingState::Unserved,
-        };
-        telemetry::record_serving_state(serving_state.telemetry_state());
+        telemetry::record_serving_state(telemetry::ServingState::Unserved);
         // Pre-initialise every per-venue series so a venue that never appears is a visible
         // zero, not a missing series.
         for config in registry.values() {
@@ -219,58 +199,15 @@ impl FreshnessTracker {
             auto_detect,
             auto_detected_gas_cost,
             stale_after,
+            via_fallback_router,
             quote_guard,
-            router_venues: HashSet::new(),
             served: HashMap::new(),
-            serving_state,
+            serving_state: ServingState::Unserved,
             newest_timestamp_nanos: 0,
             rejecting: false,
             logged_unregistered: HashSet::new(),
             auto_detected: 0,
         }
-    }
-
-    /// Applies a successful whitelist read. The first read starts serving from the next frame. A
-    /// later read that changes a served venue's family removes that venue's components now; the
-    /// next accepted frame carrying them re-adds them under the new family.
-    pub(super) fn on_whitelist_read(&mut self, venues: HashSet<Bytes>) -> Option<Update> {
-        telemetry::record_whitelisted_venues(venues.len());
-        let frontier = match self.serving_state {
-            ServingState::AwaitingWhitelist => {
-                self.router_venues = venues;
-                tracing::info!(
-                    venues = self.router_venues.len(),
-                    "PropAMMRouter venue whitelist read; serving pAMMs from the next frame"
-                );
-                self.set_serving_state(ServingState::Unserved);
-                return None;
-            }
-            ServingState::Unserved => {
-                self.router_venues = venues;
-                return None;
-            }
-            ServingState::Serving { deadline: _, frontier } => frontier,
-        };
-        let previous = std::mem::replace(&mut self.router_venues, venues);
-        let mut removed = HashMap::new();
-        for (id, served) in self.served.extract_if(|_, served| {
-            previous.contains(&served.venue_address) !=
-                self.router_venues
-                    .contains(&served.venue_address)
-        }) {
-            tracing::info!(
-                venue = %served.venue_name,
-                "pAMM changed PropAMMRouter whitelist membership; re-adding it under its new \
-                 family on the next frame"
-            );
-            removed.insert(id, served.component);
-        }
-        if removed.is_empty() {
-            return None;
-        }
-        let update = removal_update(frontier.block, removed);
-        self.settle(frontier);
-        Some(update)
     }
 
     /// Returns the frame's age if the frame passes the timestamp and block checks, or the
@@ -319,8 +256,7 @@ impl FreshnessTracker {
     }
 
     /// Processes one frame into an [`Update`], or `None` if the frame is rejected (see
-    /// [`RejectReason`]), the whitelist has not been read yet, or the frame carries no served
-    /// pAMM with a pair of known tokens.
+    /// [`RejectReason`]) or carries no served pAMM with a pair of known tokens.
     pub(super) fn on_frame(&mut self, frame: TitanPriceLevelMessage, now: Now) -> Option<Update> {
         let frame_age = match self.check_frame(&frame, now) {
             Ok(frame_age) => frame_age,
@@ -338,11 +274,6 @@ impl FreshnessTracker {
         let age_nanos = i128::from(now.wall_nanos) - i128::from(frame.timestamp);
         telemetry::record_frame_age(age_nanos as f64 / NANOS_PER_SECOND as f64);
         self.newest_timestamp_nanos = frame.timestamp;
-
-        match self.serving_state {
-            ServingState::AwaitingWhitelist => return None,
-            ServingState::Unserved | ServingState::Serving { deadline: _, frontier: _ } => {}
-        }
 
         let stale_at = now.monotonic +
             self.stale_after
@@ -372,18 +303,20 @@ impl FreshnessTracker {
                 match self.served.get_mut(&id_string) {
                     Some(served) => served.stale_at = stale_at,
                     None => {
-                        let via_router = self
-                            .router_venues
-                            .contains(&config.address);
-                        let component =
-                            build_component(&self.tokens, config, id, &token0, &token1, via_router);
+                        let component = build_component(
+                            &self.tokens,
+                            config,
+                            id,
+                            &token0,
+                            &token1,
+                            self.via_fallback_router,
+                        );
                         new_pairs.insert(id_string.clone(), component.clone());
                         self.served.insert(
                             id_string.clone(),
                             ServedComponent {
                                 component,
                                 venue_name: config.protocol.clone(),
-                                venue_address: config.address.clone(),
                                 stale_at,
                             },
                         );
@@ -481,7 +414,11 @@ impl FreshnessTracker {
             stale_after_secs = self.stale_after.as_secs(),
             "Removing price level components: no accepted frame carried them within stale_after"
         );
-        let update = removal_update(frontier.block, removed);
+        // Stamped with the newest accepted block, so the removal orders after every update the
+        // removed components were served in.
+        let update = Update::new(frontier.block, HashMap::new(), HashMap::new())
+            .set_is_partial(true)
+            .set_removed_pairs(removed);
         self.settle(frontier);
         Some(update)
     }
@@ -490,7 +427,7 @@ impl FreshnessTracker {
     pub(super) fn stale_deadline(&self) -> Option<Instant> {
         match self.serving_state {
             ServingState::Serving { deadline, frontier: _ } => Some(deadline),
-            ServingState::AwaitingWhitelist | ServingState::Unserved => None,
+            ServingState::Unserved => None,
         }
     }
 
@@ -498,17 +435,17 @@ impl FreshnessTracker {
     /// frame, and records the serving-state and per-venue gauges. Nothing served means
     /// `Unserved`, which forgets the frontier: the next frame is judged as a first frame, so a
     /// frame with an implausible block cannot cause rejections for longer than `stale_after`.
-    /// Never called while the whitelist is awaited.
     fn settle(&mut self, frontier: Frontier) {
         let deadline = self
             .served
             .values()
             .map(|served| served.stale_at)
             .min();
-        self.set_serving_state(match deadline {
+        self.serving_state = match deadline {
             Some(deadline) => ServingState::Serving { deadline, frontier },
             None => ServingState::Unserved,
-        });
+        };
+        telemetry::record_serving_state(self.serving_state.telemetry_state());
         let mut per_venue: HashMap<&str, usize> = self
             .registry
             .values()
@@ -524,16 +461,12 @@ impl FreshnessTracker {
         }
     }
 
-    fn set_serving_state(&mut self, state: ServingState) {
-        self.serving_state = state;
-        telemetry::record_serving_state(state.telemetry_state());
-    }
-
     /// Logs the first rejected frame of a streak at WARN and the rest at DEBUG.
     fn log_rejection(&mut self, reason: RejectReason, frame: &TitanPriceLevelMessage) {
+        let reason = reason.as_str();
         if self.rejecting {
             tracing::debug!(
-                reason = reason.as_str(),
+                reason,
                 block_number = frame.block_number,
                 timestamp = frame.timestamp,
                 "Rejecting price level frame"
@@ -543,10 +476,10 @@ impl FreshnessTracker {
         self.rejecting = true;
         let newest_block = match self.serving_state {
             ServingState::Serving { deadline: _, frontier } => Some(frontier.block),
-            ServingState::AwaitingWhitelist | ServingState::Unserved => None,
+            ServingState::Unserved => None,
         };
         tracing::warn!(
-            reason = reason.as_str(),
+            reason,
             block_number = frame.block_number,
             timestamp = frame.timestamp,
             newest_block = ?newest_block,
@@ -590,14 +523,6 @@ fn merge_pairs(
         }
     }
     merged
-}
-
-/// A removal-only update stamped with `block`, the newest accepted block, so it orders after
-/// every update the removed components were served in.
-fn removal_update(block: u64, removed: HashMap<String, ProtocolComponent>) -> Update {
-    Update::new(block, HashMap::new(), HashMap::new())
-        .set_is_partial(true)
-        .set_removed_pairs(removed)
 }
 
 fn build_component(
@@ -645,7 +570,7 @@ mod tests {
             telemetry::{
                 recorded::{counter_value, gauge_value, histogram_values, record_async},
                 FRAMES_ACCEPTED, FRAMES_REJECTED, FRAME_AGE, LAST_SEEN, SERVED_COMPONENTS,
-                SERVING_STATE, STALE_REMOVALS, UNREGISTERED_PAMM_ENTRIES, WHITELISTED_VENUES,
+                SERVING_STATE, STALE_REMOVALS, UNREGISTERED_PAMM_ENTRIES,
             },
             test_support::*,
         },
@@ -654,9 +579,6 @@ mod tests {
 
     /// 2026-09-05 16:09:18 UTC, the first frame of the live capture.
     const BASE_WALL_NANOS: u64 = 1_788_624_558_000_000_000;
-
-    /// A second registered venue, for tests where only one of two served venues changes.
-    const OTHER_PAMM: &str = "0x71e790dd841c8a9061487cb3e78c288e75ce0b3d";
 
     /// A test clock whose wall and monotonic time advance together: `at(s)` is `s` seconds after
     /// the start. Tests must pass non-decreasing seconds, as a monotonic clock would give.
@@ -677,8 +599,8 @@ mod tests {
         }
     }
 
-    /// Settings serving the registered `configs` with the defaults, auto-detection off and no
-    /// whitelist.
+    /// Settings serving the registered `configs` with the defaults, auto-detection off and the
+    /// direct family.
     fn settings(configs: Vec<PriceLevelStreamConfig>) -> TrackerSettings {
         TrackerSettings {
             registry: configs
@@ -690,7 +612,7 @@ mod tests {
             auto_detect: false,
             auto_detected_gas_cost: BigUint::from(DEFAULT_AUTO_DETECTED_GAS_COST),
             stale_after: DEFAULT_STALE_AFTER,
-            whitelist: Whitelist::NotUsed,
+            via_fallback_router: false,
             quote_guard: true,
         }
     }
@@ -698,24 +620,13 @@ mod tests {
     /// A tracker serving the registered `configs` with auto-detection off.
     fn tracker_serving(
         configs: Vec<PriceLevelStreamConfig>,
-        whitelist: Whitelist,
+        via_fallback_router: bool,
     ) -> FreshnessTracker {
-        FreshnessTracker::new(TrackerSettings { whitelist, ..settings(configs) })
+        FreshnessTracker::new(TrackerSettings { via_fallback_router, ..settings(configs) })
     }
 
     fn tracker() -> FreshnessTracker {
-        tracker_serving(vec![fermiswap()], Whitelist::NotUsed)
-    }
-
-    fn tracker_awaiting_whitelist() -> FreshnessTracker {
-        tracker_serving(vec![fermiswap()], Whitelist::Awaited)
-    }
-
-    fn venues(addresses: &[&str]) -> HashSet<Bytes> {
-        addresses
-            .iter()
-            .map(|address| Bytes::from_str(address).unwrap())
-            .collect()
+        tracker_serving(vec![fermiswap()], false)
     }
 
     fn level(amount_in: u64, amount_out: u64) -> TitanPriceLevel {
@@ -983,28 +894,6 @@ mod tests {
             tracker.on_frame(message_at(100, 6, wbtc_usdc_pairs()), clock.at(9));
         });
         assert_eq!(histogram_values(&snapshot, FRAME_AGE, &[]), vec![2.0, -3.0]);
-    }
-
-    /// An id is never in both `removed_pairs` and `new_pairs` of one update, and a removal
-    /// carries no states, across every path that removes: family change and stale deadline.
-    #[test]
-    fn no_update_both_removes_and_adds_an_id() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(venues(&[PAMM]));
-        let mut updates = Vec::new();
-        updates.extend(tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0)));
-        updates.extend(tracker.on_whitelist_read(venues(&[])));
-        updates.extend(tracker.on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1)));
-        updates.extend(tracker.on_stale_deadline(clock.at(25).monotonic));
-        updates.extend(tracker.on_frame(message_at(102, 26, wbtc_usdc_pairs()), clock.at(26)));
-        assert_eq!(updates.len(), 5);
-        for update in &updates {
-            for id in update.removed_pairs.keys() {
-                assert!(!update.new_pairs.contains_key(id), "{id} removed and added");
-                assert!(!update.states.contains_key(id), "{id} removed with a state");
-            }
-        }
     }
 
     #[test]
@@ -1372,31 +1261,6 @@ mod tests {
     }
 
     #[test]
-    fn implausible_block_during_whitelist_wait() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        // Accepted, but nothing is served while the whitelist is unknown, so the implausible
-        // block must not survive as `newest_block`.
-        assert!(tracker
-            .on_frame(message_at(u64::MAX / 2, 0, wbtc_usdc_pairs()), clock.at(0))
-            .is_none());
-
-        assert!(tracker
-            .on_whitelist_read(venues(&[PAMM]))
-            .is_none());
-
-        // The first frame that can be served is judged as a first frame, not against the block
-        // of a frame that served nothing.
-        let update = tracker
-            .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1))
-            .expect("update expected");
-        assert_eq!(update.block_number_or_timestamp, 100);
-        assert!(update
-            .new_pairs
-            .contains_key(&expected_id()));
-    }
-
-    #[test]
     fn implausible_block_on_a_frame_serving_nothing() {
         let clock = Clock::new();
         let mut tracker = tracker();
@@ -1476,7 +1340,7 @@ mod tests {
         });
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
         assert_eq!(gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]), 0.0);
-        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 0.0);
     }
 
     #[test]
@@ -1491,7 +1355,7 @@ mod tests {
             gauge_value(&snapshot, LAST_SEEN, &[("venue", "fermiswap")]),
             (BASE_WALL_NANOS / NANOS_PER_SECOND) as f64
         );
-        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 2.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
     }
 
     #[test]
@@ -1503,13 +1367,13 @@ mod tests {
             tracker.on_stale_deadline(clock.at(24).monotonic);
         });
         assert_eq!(gauge_value(&snapshot, SERVED_COMPONENTS, &[("venue", "fermiswap")]), 0.0);
-        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 1.0);
+        assert_eq!(gauge_value(&snapshot, SERVING_STATE, &[]), 0.0);
     }
 
     #[test]
     fn unregistered_pamm_produces_no_update_without_auto_detection() {
         let clock = Clock::new();
-        let mut tracker = tracker_serving(vec![], Whitelist::NotUsed);
+        let mut tracker = tracker_serving(vec![], false);
         assert!(tracker
             .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
             .is_none());
@@ -1572,199 +1436,11 @@ mod tests {
         assert_eq!(state.gas_cost, BigUint::from(42_000u64));
     }
 
-    /// A venue on the router's whitelist is emitted under `propammfallback:{name}`, so its swaps
-    /// execute through Titan's PropAMMRouter; identity and attributes stay the same.
-    #[test]
-    fn whitelisted_venue_is_served_under_the_fallback_family() {
-        let clock = Clock::new();
-        let mut tracker = tracker();
-        assert!(tracker
-            .on_whitelist_read(venues(&[PAMM]))
-            .is_none());
-
-        let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
-
-        let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, "propammfallback:fermiswap");
-        assert_eq!(
-            component.static_attributes[PAMM_ADDRESS_ATTRIBUTE],
-            Bytes::from_str(PAMM).unwrap()
-        );
-    }
-
-    /// The whitelist check is by address, so it also covers auto-detected, address-named venues.
-    #[test]
-    fn auto_detected_whitelisted_venue_is_served_under_the_fallback_family() {
-        let clock = Clock::new();
-        let mut tracker =
-            FreshnessTracker::new(TrackerSettings { auto_detect: true, ..settings(vec![]) });
-        assert!(tracker
-            .on_whitelist_read(venues(&[PAMM]))
-            .is_none());
-
-        let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
-
-        let component = &update.new_pairs[&expected_id()];
-        assert_eq!(component.protocol_system, format!("propammfallback:{PAMM}"));
-    }
-
-    /// A venue absent from the whitelist keeps the direct `pricelevelstream:{name}` family — the
-    /// router reverts `UnknownVenue` for it, which would send every swap to the Uniswap V3
-    /// fallback.
-    #[test]
-    fn unwhitelisted_venue_keeps_the_direct_family() {
-        let clock = Clock::new();
-        let mut tracker = tracker();
-        assert!(tracker
-            .on_whitelist_read(venues(&[OTHER_PAMM]))
-            .is_none());
-
-        let update = tracker
-            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
-
-        assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
-    }
-
-    #[test]
-    fn nothing_is_emitted_until_the_whitelist_is_known() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        assert!(tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
-            .is_none());
-        assert!(tracker.stale_deadline().is_none());
-
-        assert!(tracker
-            .on_whitelist_read(venues(&[PAMM]))
-            .is_none());
-        let update = tracker
-            .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1))
-            .expect("update expected");
-        assert_eq!(update.new_pairs[&expected_id()].protocol_system, "propammfallback:fermiswap");
-    }
-
-    /// A whitelist read while nothing is served only replaces the set: the next frame serves
-    /// under the family the new set gives.
-    #[test]
-    fn whitelist_read_while_unserved_applies_to_the_next_frame() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(venues(&[]));
-        assert!(tracker
-            .on_whitelist_read(venues(&[PAMM]))
-            .is_none());
-        let update = tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
-        assert_eq!(update.new_pairs[&expected_id()].protocol_system, "propammfallback:fermiswap");
-    }
-
-    #[test]
-    fn family_change_removes_now_and_re_adds_under_the_new_family() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(venues(&[PAMM]));
-        tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
-
-        // The venue gets de-whitelisted.
-        let update = tracker
-            .on_whitelist_read(venues(&[]))
-            .expect("removal expected");
-        assert!(update.states.is_empty());
-        assert!(update.new_pairs.is_empty());
-        assert_eq!(
-            update.removed_pairs[&expected_id()].protocol_system,
-            "propammfallback:fermiswap"
-        );
-        assert_eq!(update.block_number_or_timestamp, 100);
-        assert!(update.is_partial);
-        assert!(tracker.stale_deadline().is_none());
-
-        let update = tracker
-            .on_frame(message_at(100, 1, wbtc_usdc_pairs()), clock.at(1))
-            .expect("update expected");
-        assert_eq!(update.new_pairs[&expected_id()].protocol_system, "pricelevelstream:fermiswap");
-        assert!(update.removed_pairs.is_empty());
-    }
-
-    /// Two served venues; only FermiSwap changes whitelist membership, in either direction. Only
-    /// its component is removed and the other venue keeps the stream serving.
-    #[rstest]
-    #[case::fallback_to_direct(&[PAMM], &[], "propammfallback:fermiswap")]
-    #[case::direct_to_fallback(&[OTHER_PAMM], &[OTHER_PAMM, PAMM], "pricelevelstream:fermiswap")]
-    fn family_change_of_one_venue_removes_only_its_components(
-        #[case] whitelist_before: &[&str],
-        #[case] whitelist_after: &[&str],
-        #[case] old_family: &str,
-    ) {
-        let clock = Clock::new();
-        let other = PriceLevelStreamConfig::new(
-            "othervenue",
-            Bytes::from_str(OTHER_PAMM).unwrap(),
-            BigUint::from(120_000u64),
-        );
-        let mut tracker = tracker_serving(vec![fermiswap(), other], Whitelist::Awaited);
-        tracker.on_whitelist_read(venues(whitelist_before));
-        let frame = TitanPriceLevelMessage {
-            block_number: 100,
-            timestamp: BASE_WALL_NANOS,
-            pamms: vec![
-                TitanPammLevels { pamm: Bytes::from_str(PAMM).unwrap(), pairs: wbtc_usdc_pairs() },
-                TitanPammLevels {
-                    pamm: Bytes::from_str(OTHER_PAMM).unwrap(),
-                    pairs: wbtc_usdc_pairs(),
-                },
-            ],
-        };
-        let served = tracker
-            .on_frame(frame, clock.at(0))
-            .expect("update expected");
-        assert_eq!(served.new_pairs.len(), 2);
-
-        let update = tracker
-            .on_whitelist_read(venues(whitelist_after))
-            .expect("removal expected");
-
-        assert_eq!(update.removed_pairs.len(), 1);
-        assert_eq!(update.removed_pairs[&expected_id()].protocol_system, old_family);
-        assert_eq!(update.block_number_or_timestamp, 100);
-        assert!(tracker.stale_deadline().is_some());
-    }
-
-    #[test]
-    fn unchanged_whitelist_emits_nothing() {
-        let clock = Clock::new();
-        let mut tracker = tracker_awaiting_whitelist();
-        tracker.on_whitelist_read(venues(&[PAMM]));
-        tracker
-            .on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0))
-            .expect("update expected");
-        assert!(tracker
-            .on_whitelist_read(venues(&[PAMM]))
-            .is_none());
-    }
-
-    #[test]
-    fn whitelist_read_gauges_the_venue_count() {
-        let ((), snapshot) = record_async(async {
-            let mut tracker = tracker_awaiting_whitelist();
-            tracker.on_whitelist_read(venues(&[PAMM]));
-        });
-        assert_eq!(gauge_value(&snapshot, WHITELISTED_VENUES, &[]), 1.0);
-    }
-
     #[test]
     fn unregistered_venues_counter_and_log_cap() {
         let (logged, snapshot) = record_async(async {
             let clock = Clock::new();
-            let mut tracker = tracker_serving(vec![], Whitelist::NotUsed);
+            let mut tracker = tracker_serving(vec![], false);
             // 70 distinct unregistered addresses, each seen twice.
             for round in 0..2u64 {
                 for index in 0..70u64 {
@@ -1795,5 +1471,57 @@ mod tests {
         assert!(tracker
             .on_frame(message(100, unknown), clock.at(0))
             .is_none());
+    }
+
+    /// An id is never in both `removed_pairs` and `new_pairs` of one update, and a removal
+    /// carries no states.
+    #[test]
+    fn no_update_both_removes_and_adds_an_id() {
+        let clock = Clock::new();
+        let mut tracker = tracker();
+        let mut updates = Vec::new();
+        updates.extend(tracker.on_frame(message_at(100, 0, wbtc_usdc_pairs()), clock.at(0)));
+        updates.extend(tracker.on_stale_deadline(clock.at(24).monotonic));
+        updates.extend(tracker.on_frame(message_at(102, 25, wbtc_usdc_pairs()), clock.at(25)));
+        assert_eq!(updates.len(), 3);
+        for update in &updates {
+            for id in update.removed_pairs.keys() {
+                assert!(!update.new_pairs.contains_key(id), "{id} removed and added");
+                assert!(!update.states.contains_key(id), "{id} removed with a state");
+            }
+        }
+    }
+
+    /// Components are emitted under `fallback:{name}`, so their swaps execute through
+    /// `TychoFallbackRouter`; identity and attributes are the same as on the direct path.
+    #[test]
+    fn venues_are_served_under_the_fallback_family() {
+        let clock = Clock::new();
+        let mut tracker = tracker_serving(vec![fermiswap()], true);
+        let update = tracker
+            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .expect("update expected");
+
+        let component = &update.new_pairs[&expected_id()];
+        assert_eq!(component.protocol_system, "fallback:fermiswap");
+        assert_eq!(
+            component.static_attributes[PAMM_ADDRESS_ATTRIBUTE],
+            Bytes::from_str(PAMM).unwrap()
+        );
+    }
+
+    /// Auto-detected, address-named venues take the fallback family too.
+    #[test]
+    fn auto_detected_venue_is_served_under_the_fallback_family() {
+        let clock = Clock::new();
+        let mut tracker = FreshnessTracker::new(TrackerSettings {
+            auto_detect: true,
+            via_fallback_router: true,
+            ..settings(vec![])
+        });
+        let update = tracker
+            .on_frame(message(100, wbtc_usdc_pairs()), clock.at(0))
+            .expect("update expected");
+        assert_eq!(update.new_pairs[&expected_id()].protocol_system, format!("fallback:{PAMM}"));
     }
 }

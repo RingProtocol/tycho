@@ -14,7 +14,7 @@ testing.rs                  Test utilities
 extractor/
   protocol_extractor.rs     ProtocolExtractor — core message processor (see below)
   runner.rs                 ExtractorRunner: drives the Substreams stream; ExtractorHandle for control
-  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map
+  supervisor.rs             ExtractorSupervisor: restart lifecycle with exponential backoff; owns the subscription map; counts rebuilds in `extractor_restarts_total` (registered at zero)
   factory.rs                ExtractorFactory: builds a fresh extractor + runner per (re)start; extractor config types
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
@@ -43,7 +43,10 @@ services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
   rpc.rs                    HTTP endpoints: state snapshots, component queries
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
-  deltas_buffer.rs          PendingDeltasBuffer — pending-block state for RPC consistency
+  deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
+  state/
+    window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup, wired into the services by ENG-6293
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -117,17 +120,24 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    created and deleted is malformed module output, so it goes through the lookup like a
    pre-existing attribute. Attributes with no prior value anywhere revert as deletions,
    emit one summary warning, and increment `extractor_revert_attr_miss` per attribute; its
-   `component_state_found` label says whether the DB returned state rows for the
-   component. The extractor registers both label sets at zero at startup so the first
-   miss is visible to `increase()`. Any hit means an upstream module emitted an Update
-   or Deletion for an attribute that never had a Creation.
+   `component_known` label says whether the component is known anywhere: a
+   `TxWithChanges.protocol_components` entry in buffer history or a row in the
+   `protocol_component` table. `false` means an upstream module emitted state for a
+   component Tycho never saw created. The extractor registers both label sets at zero at
+   startup so the first miss is visible to `increase()`. Any hit means an upstream module
+   emitted an Update or Deletion for an attribute that never had a Creation.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
    state is always on the canonical chain.
 
-`PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
-hash-only `purge` on the block named by the broadcast revert message.
+`PendingDeltas` (RPC side) mirrors this through its per-extractor `DeltaWindow`, using the
+strict hash-only `purge` on the block named by the broadcast revert message. A revert to a block
+below `min(finalized, db_committed)`, a revert to an unknown hash, or a block that does not
+extend the window's chain is an error that ends the pump and the process: only the extractor's
+replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
+blocks into the sink and clears it; the restarted extractor replays everything above its
+database cursor.
 
 ## Persistence
 
@@ -151,8 +161,19 @@ clients). When an RPC query arrives, the handler fetches the DB snapshot then ap
 pending deltas on top, giving a consistent view up to the chain tip. Without this feed the RPC
 would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
-`db_committed_block_height` on each message tells `PendingDeltasBuffer` when a block has been
-written; it auto-drains those blocks so memory usage stays bounded.
+`db_committed_block_height` on each message is one of the three watermarks bounding retention.
+Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until it is at or below
+`min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
+Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
+to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
+Depth and fold batching come from `--delta-window-depth` (default 128) and
+`--delta-window-fold-batch` (default 1).
+
+With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
+snapshot after the extractors are built and before the server starts (`EntityCache::load` in
+`services/state/cache.rs`), then drops it: handing it to the services as the window sink and the
+read source is ENG-6293. The windows fold into `DiscardSink`. `off` (the default) skips the load.
+A failed load is a setup error and ends the process.
 
 ## Connections
 
@@ -165,8 +186,9 @@ ExtractorSupervisor (supervisor.rs) — rebuilds the runner via ExtractorFactory
        │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
        └─ broadcast DeltaCommand (Block | ExtractorRestarted)
             ├─ WsService (services/ws.rs) → WebSocket clients
-            └─ PendingDeltasBuffer (services/deltas_buffer.rs)
-                 └─ RpcHandlers (services/rpc.rs) → HTTP responses
+            └─ PendingDeltas (services/deltas_buffer.rs)
+                 └─ DeltaWindow per extractor (services/state/window.rs)
+                      └─ RpcHandlers (services/rpc.rs) → HTTP responses
 ```
 
 ## Client Sync

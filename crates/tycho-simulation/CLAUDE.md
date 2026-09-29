@@ -39,35 +39,32 @@ for any protocol indexed by Tycho.
   `eq`; `without_quote_guard` on the builder turns it off for slow quoters). Frames are best
   effort, so `tracker.rs` never removes a component because a frame omits it. It gives every
   component its own deadline and emits `removed_pairs` only when the component's data is
-  `stale_after` old or its PropAMMRouter family changes. The next accepted frame carrying the
-  component re-adds it. Frames are accepted only if their wire `timestamp` is younger than
-  `stale_after`, not more than one slot in the future, not older than the newest accepted one
-  (equal allowed), and their block neither regresses nor jumps more than one block per elapsed
-  slot plus 2; the block frontier lives in `ServingState::Serving`, so it exists only while
-  something is served. The windows and their defaults are listed under `# Freshness contract` in
-  `price_level_stream/mod.rs`; every window is a multiple of `SLOT` in `mod.rs`. `build()`
-  returns `Err(PriceLevelStreamBuildError)` without `fallback_router_rpc_url` or `RPC_URL`, with
-  a URL that does not parse, or with a `stale_after` outside `(0, MAX_STALE_AFTER]`; otherwise it
-  is an `async_stream` loop that selects over frames, a timer set to the earliest component
-  deadline, and the whitelist reader in `fallback_router.rs`, which yields only successful reads
-  (each bounded by a timeout, retried with backoff, repeated on an interval). Nothing is served
-  until the first read succeeds; `without_fallback_router` skips the read and keeps every venue
-  on the direct path. `titan.rs` reconnects when no frame parses within the idle timeout; pings,
-  unparsable text and the consumer's own pauses between polls do not count. `telemetry.rs` emits
-  `price_level_stream_*` metrics through the `metrics` facade, with label values as enums there
-  and a frame-age histogram at acceptance. Per-venue series start at zero, and no label carries
-  a wire value except the address of an auto-detected venue. A new builder serves nothing:
-  `with_known_pamms` registers
-  the known-good venues and denies known-unexecutable ones, `add_pamm` registers individual ones,
-  `deny_pamm` excludes one (dropping any registration and blocking auto-detection), and opt-in
-  auto-detection additionally serves unknown venues under their address
-  (`pricelevelstream:{0xaddress}`). Registration precedence: between `add_pamm` and `deny_pamm`
-  for the same address the later call wins; `with_known_pamms` defaults never override either.
-  Components are identified as `pricelevelstream:{pamm}`, or `propammfallback:{pamm}` for
-  whitelisted venues, so tycho-execution routes those swaps through the router (Uniswap V3
-  fallback on venue revert). Consumers cannot tell a stale removal from a retired venue. Venues
-  may overlap with other integration paths of the same liquidity (e.g. `vm:fermiswap`) —
-  consumers must deduplicate by venue where double-counting matters
+  `stale_after` old; the next accepted frame carrying the component re-adds it. Frames are
+  accepted only if their wire `timestamp` is younger than `stale_after`, not more than one slot
+  in the future, not older than the newest accepted one (equal allowed), and their block neither
+  regresses nor jumps more than one block per elapsed slot plus 2; the block frontier lives in
+  `ServingState::Serving`, so it exists only while something is served. The windows and their
+  defaults are listed under `# Freshness contract` in `price_level_stream/mod.rs`; every window
+  is a multiple of `SLOT` in `mod.rs`. `build()` returns `Err(PriceLevelStreamBuildError)` for a
+  `stale_after` outside `(0, MAX_STALE_AFTER]`; otherwise it is an `async_stream` loop that
+  selects over frames and a timer set to the earliest component deadline. `titan.rs` reconnects
+  when no frame parses within the idle timeout; pings, unparsable text and the consumer's own
+  pauses between polls do not count. `telemetry.rs` emits `price_level_stream_*` metrics through
+  the `metrics` facade, with label values as enums there and a frame-age histogram at
+  acceptance. Per-venue series start at zero, and no label carries a wire value except the
+  address of an auto-detected venue. Components are identified as `pricelevelstream:{pamm}`. A
+  new builder serves nothing: `with_known_pamms` registers the known-good venues and denies
+  known-unexecutable ones, `add_pamm` registers individual ones, `deny_pamm` excludes one
+  (dropping any registration and blocking auto-detection), and opt-in auto-detection
+  additionally serves unknown venues under their address (`pricelevelstream:{0xaddress}`), at
+  most 64 per process. Precedence: between `add_pamm` and `deny_pamm` for the same address the
+  later call wins; `with_known_pamms` defaults never override either, regardless of call order.
+  By default `build` emits every venue under `fallback:{pamm}`, so tycho-execution routes their
+  swaps through `TychoFallbackRouter` (retry on a solver-named fallback pool when the venue
+  reverts); `without_fallback_router` keeps every venue on the direct `pricelevelstream:` path.
+  Consumers cannot tell a stale removal from a retired venue. Venues may overlap with other
+  integration paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by
+  venue where double-counting matters
 
 ## Simulation Approaches
 
@@ -83,6 +80,25 @@ fallback for protocols too complex to port, not a default.
 3. **VM** — Solidity adapter in `revm`; works for any EVM protocol but is slower and requires an
    adapter contract in `protocols/adapter-integration/`. Use only when native is not feasible.
 4. **RFQ** — off-chain quotes via API; for protocols that cannot be simulated on-chain at all.
+
+## Pending-block state for hybrid/VM protocols
+
+`apply_deltas_ephemeral` applies only `state_deltas`; nothing on the pending path writes to the
+VM database, so `apply_deltas_ephemeral` can't read the pending state from there. A protocol
+whose `delta_transition` re-reads the VM would therefore quote a pending block against confirmed
+state. Fluid and Curve close that gap the same way:
+
+1. A `TxDeltaIndexer` implementation — which lives in the consuming repo, not here — builds
+   `evm::simulation::PendingOverrides` (storage, native balances and block environment) from the
+   accounts a `PendingBlock` carries.
+2. It reads the protocol's state under those overrides (`fluid::call_resolver`,
+   `curve::read_pool_readings`) and puts the result in a state-delta attribute
+   (`pool_reserves_adjusted`, `pool_state_adjusted`).
+3. `delta_transition` branches on that attribute and rebuilds from it, falling back to the VM read
+   when it is absent.
+
+Reading under the pending block's own number and timestamp matters: anything with on-chain time
+math (Fluid's expanding limits, Curve's ramping `A()`) is wrong under the parent block's clock.
 
 ## Features
 

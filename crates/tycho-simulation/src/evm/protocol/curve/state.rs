@@ -18,7 +18,11 @@ use tycho_common::{
 use crate::evm::{
     engine_db::{create_engine, SHARED_TYCHO_DB},
     protocol::{
-        curve::{adapter::CurveVariant, math::Pool, vm},
+        curve::{
+            adapter::{build_pool, CurveVariant},
+            math::Pool,
+            vm,
+        },
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
     },
 };
@@ -57,7 +61,7 @@ pub struct CurveState {
 
 impl CurveState {
     /// Construct a `CurveState` from a resolved variant and a built `curve_math::Pool`.
-    pub(super) fn new(
+    pub fn new(
         pool_address: Bytes,
         tokens: Vec<Bytes>,
         decimals: Vec<u8>,
@@ -206,16 +210,48 @@ impl ProtocolSim for CurveState {
         Ok((u256_to_biguint(balance_in), u256_to_biguint(max_out)))
     }
 
+    /// When `updated_attributes` carries [`vm::POOL_STATE_ADJUSTED`], the pool is rebuilt from
+    /// those readings. Otherwise the view getters are read from the indexed VM storage.
+    ///
+    /// The attribute exists for pending blocks, whose state never reaches that storage: an
+    /// indexer that has already read the pool under the pending block's overrides passes the
+    /// readings through instead.
     fn delta_transition(
         &mut self,
-        _delta: ProtocolStateDelta,
+        delta: ProtocolStateDelta,
         _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
-        let pool_address = AlloyAddress::from_slice(self.pool_address.as_ref());
-        self.pool = vm::decode_from_vm(&engine, &pool_address, self.variant, &self.decimals)
-            .map_err(TransitionError::SimulationError)?;
+        self.pool = match delta
+            .updated_attributes
+            .get(vm::POOL_STATE_ADJUSTED)
+        {
+            Some(encoded) => {
+                let state = vm::decode_raw_state(encoded)?;
+                if state.variant != self.variant {
+                    return Err(SimulationError::FatalError(format!(
+                        "Variant mismatch: expected {}, got {}",
+                        self.variant, state.variant
+                    ))
+                    .into())
+                }
+                if state.token_decimals != self.decimals {
+                    return Err(SimulationError::FatalError(format!(
+                        "Token decimals mismatch: expected {:?}, got {:?}",
+                        self.decimals, state.token_decimals
+                    ))
+                    .into())
+                }
+                build_pool(&state).map_err(|e| {
+                    SimulationError::FatalError(format!("curve build_pool failed: {e}"))
+                })?
+            }
+            None => {
+                let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
+                let pool_address = AlloyAddress::from_slice(self.pool_address.as_ref());
+                vm::decode_from_vm(&engine, &pool_address, self.variant, &self.decimals)?
+            }
+        };
         Ok(())
     }
 
@@ -236,5 +272,128 @@ impl ProtocolSim for CurveState {
             .as_any()
             .downcast_ref::<Self>()
             .is_some_and(|other| self == other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::evm::protocol::curve::{adapter::RawPoolState, vm::encode_raw_state};
+
+    const VARIANT: CurveVariant = CurveVariant::TriCryptoNG;
+    const DECIMALS: [u8; 3] = [6, 8, 18];
+
+    fn u(s: &str) -> U256 {
+        s.parse().unwrap()
+    }
+
+    /// The TriCryptoNG USDC/WBTC/WETH pool (0x7f86bf…), balances aside.
+    fn raw_pool_state(balances: Vec<U256>) -> RawPoolState {
+        RawPoolState {
+            variant: VARIANT,
+            balances,
+            token_decimals: DECIMALS.to_vec(),
+            amp: u("1707629"),
+            mid_fee: Some(u("3000000")),
+            out_fee: Some(u("30000000")),
+            fee_gamma: Some(u("500000000000000")),
+            d: Some(u("7457948167729606869978625")),
+            gamma: Some(u("11809167828997")),
+            price_scale: Some(vec![u("59372627314351316239076"), u("1565715369034455123313")]),
+            ..Default::default()
+        }
+    }
+
+    fn state(balances: Vec<U256>) -> CurveState {
+        let raw_state = raw_pool_state(balances);
+        let pool = build_pool(&raw_state).expect("build");
+        CurveState::new(
+            Bytes::from([7u8; 20]),
+            vec![Bytes::from([1u8; 20]), Bytes::from([2u8; 20]), Bytes::from([3u8; 20])],
+            DECIMALS.to_vec(),
+            VARIANT,
+            pool,
+        )
+    }
+
+    fn delta(attributes: HashMap<String, Bytes>) -> ProtocolStateDelta {
+        ProtocolStateDelta { updated_attributes: attributes, ..Default::default() }
+    }
+
+    #[test]
+    fn test_delta_transition_rebuilds_from_attribute() {
+        let confirmed = vec![u("2466241139205"), u("4200057336"), u("1595469030050811720465")];
+        let pending = vec![u("2470000000000"), u("4190000000"), u("1600000000000000000000")];
+        let mut curve = state(confirmed.clone());
+        let attribute = encode_raw_state(&raw_pool_state(pending.clone())).expect("encode");
+
+        curve
+            .delta_transition(
+                delta(HashMap::from([(vm::POOL_STATE_ADJUSTED.to_string(), attribute)])),
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .expect("delta transition from attribute failed");
+
+        // The readings must come from the attribute. A VM read would fail here anyway: the
+        // shared engine has no block set in this test.
+        assert_eq!(
+            curve.pool.balances()[..3],
+            pending[..],
+            "balances must come from the attribute"
+        );
+        assert_ne!(curve.pool.balances()[..3], confirmed[..]);
+    }
+
+    #[test]
+    fn test_delta_transition_errors_on_variant_mismatch() {
+        let mut curve = state(vec![u("1"), u("2"), u("3")]);
+        let mut pending_state = raw_pool_state(curve.pool.balances().to_vec());
+        pending_state.variant = CurveVariant::StableSwapMeta;
+        let encoded = encode_raw_state(&pending_state).expect("encode");
+
+        let result = curve.delta_transition(
+            delta(HashMap::from([(vm::POOL_STATE_ADJUSTED.to_string(), encoded)])),
+            &HashMap::new(),
+            &Balances::default(),
+        );
+
+        assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
+    }
+
+    #[test]
+    fn test_delta_transition_errors_on_decimals_mismatch() {
+        let mut curve = state(vec![u("1"), u("2"), u("3")]);
+        let mut pending_state = raw_pool_state(curve.pool.balances().to_vec());
+        pending_state.token_decimals = vec![18, 18, 18];
+        let encoded = encode_raw_state(&pending_state).expect("encode");
+
+        let result = curve.delta_transition(
+            delta(HashMap::from([(vm::POOL_STATE_ADJUSTED.to_string(), encoded)])),
+            &HashMap::new(),
+            &Balances::default(),
+        );
+
+        assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
+    }
+
+    #[test]
+    fn test_delta_transition_rejects_malformed_attribute() {
+        let mut curve = state(vec![u("1"), u("2"), u("3")]);
+
+        let result = curve.delta_transition(
+            delta(HashMap::from([(
+                vm::POOL_STATE_ADJUSTED.to_string(),
+                Bytes::from(b"not json".to_vec()),
+            )])),
+            &HashMap::new(),
+            &Balances::default(),
+        );
+
+        // Falling back to the indexed VM state would silently price a pending block against
+        // confirmed state, so a malformed attribute must fail instead.
+        assert!(matches!(result, Err(TransitionError::SimulationError(_))), "got {result:?}");
     }
 }

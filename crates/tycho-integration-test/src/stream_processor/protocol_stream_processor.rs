@@ -23,11 +23,13 @@ use tycho_simulation::{
             ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State,
             erc4626::state::ERC4626State,
+            etherfi::state::EtherfiState,
             filters::{
                 balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter, erc4626_filter,
                 fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
             fluid::FluidV1,
+            lido_v4::state::LidoV4State,
             lunarbase::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
@@ -224,6 +226,8 @@ impl ProtocolStreamProcessor {
                 "ekubo_v3".to_string(),
                 "rocketpool".to_string(),
                 "sky".to_string(),
+                "lido_v4".to_string(),
+                "etherfi".to_string(),
                 "vm:liquidityparty".to_string(),
                 "vm:fermiswap".to_string(),
                 "vm:bopamm".to_string(),
@@ -273,7 +277,10 @@ impl ProtocolStreamProcessor {
                     "uniswap_v4".to_string(),
                     "sushiswap_v3".to_string(),
                     "robinswap_v3".to_string(),
+                    "gigadex_v3".to_string(),
                     "ramses_v3".to_string(),
+                    "ekubo_v3".to_string(),
+                    "up_v3".to_string(),
                 ]
             }
             Chain::Arbitrum => {
@@ -320,6 +327,9 @@ impl ProtocolStreamProcessor {
             "robinswap_v3" => {
                 stream =
                     stream.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None);
+            }
+            "gigadex_v3" => {
+                stream = stream.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None);
             }
             "pancakeswap_v3" => {
                 stream =
@@ -391,6 +401,12 @@ impl ProtocolStreamProcessor {
                     None,
                 );
             }
+            // UP on Robinhood Chain deploys the Slipstream contracts verbatim, so it decodes
+            // with the same state as Aerodrome.
+            "up_v3" => {
+                stream =
+                    stream.exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None);
+            }
             "ramses_v3" => {
                 stream = stream.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);
             }
@@ -399,6 +415,12 @@ impl ProtocolStreamProcessor {
             }
             "sky" => {
                 stream = stream.exchange::<SkyState>("sky", tvl_filter.clone(), None);
+            }
+            "lido_v4" => {
+                stream = stream.exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None);
+            }
+            "etherfi" => {
+                stream = stream.exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None);
             }
             "cowamm" => {
                 stream = stream.exchange::<CowAMMState>("cowamm", tvl_filter.clone(), None);

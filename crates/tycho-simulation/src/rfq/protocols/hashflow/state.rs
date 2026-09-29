@@ -124,7 +124,7 @@ impl ProtocolSim for HashflowState {
                 .ok_or_else(|| {
                     SimulationError::RecoverableError("Can't convert amount out to BigUInt".into())
                 })?,
-            gas: BigUint::from(134_000u64), // Rough gas estimation
+            gas: BigUint::from(151_000u64), // Rough gas estimation
             new_state: self.clone_box(),    // The state doesn't change after a swap
         };
 
@@ -359,7 +359,7 @@ mod tests {
 
             // Expected: (0.5 * 3000) + (1.0 * 3000) = 1500 + 3000 = 4500 USDC
             assert_eq!(amount_out_result.amount, BigUint::from_str("4500000000").unwrap()); // 6 decimals
-            assert_eq!(amount_out_result.gas, BigUint::from(134_000u64));
+            assert_eq!(amount_out_result.gas, BigUint::from(151_000u64));
         }
 
         #[test]

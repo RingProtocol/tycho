@@ -51,7 +51,7 @@ impl SwapEncoder for HashflowSwapEncoder {
                 "Estimated amount in is mandatory for a Hashflow swap".to_string(),
             ))?
             .clone();
-        let sender = encoding_context
+        let router_address = encoding_context
             .router_address
             .clone()
             .ok_or(EncodingError::FatalError(
@@ -65,8 +65,8 @@ impl SwapEncoder for HashflowSwapEncoder {
                         amount_in,
                         token_in: swap.token_in().address.clone(),
                         token_out: swap.token_out().address.clone(),
-                        sender: sender.clone(),
-                        receiver: sender,
+                        sender: router_address.clone(),
+                        receiver: router_address,
                     })
                     .await
             })
@@ -78,6 +78,7 @@ impl SwapEncoder for HashflowSwapEncoder {
             "pool",
             "external_account",
             "trader",
+            "effective_trader",
             "base_token",
             "quote_token",
             "base_token_amount",
@@ -197,6 +198,10 @@ mod test {
             (
                 "trader".to_string(),
                 Bytes::from_str("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2").unwrap(),
+            ),
+            (
+                "effective_trader".to_string(),
+                Bytes::from_str("0x1111111111111111111111111111111111111111").unwrap(),
             ),
             (
                 "base_token".to_string(),

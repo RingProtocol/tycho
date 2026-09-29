@@ -90,7 +90,7 @@ impl std::error::Error for BuildError {}
 /// The consumer fills in the fields relevant to the pool's [`CurveVariant`],
 /// then calls [`build_pool`] to get a `crate::evm::protocol::curve::math::Pool` ready for swap
 /// computation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct RawPoolState {
     /// Which Curve variant this pool is.
     pub variant: CurveVariant,
