@@ -369,6 +369,7 @@ mod tests {
 
     use futures::{future::BoxFuture, SinkExt};
     use num_bigint::BigUint;
+    use rstest::rstest;
     use tokio_tungstenite::tungstenite::Message;
 
     use super::{
@@ -741,14 +742,7 @@ mod tests {
     ) -> impl Fn(usize, FakeConnection) -> BoxFuture<'static, ()> + Send + Sync + 'static {
         move |_, mut socket| {
             Box::pin(async move {
-                loop {
-                    if socket
-                        .send(fresh_frame())
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                while socket.send(fresh_frame()).await.is_ok() {
                     tokio::time::sleep(interval).await;
                 }
             })
@@ -859,44 +853,23 @@ mod tests {
         assert_eq!(format!("{FALLBACK_FAMILY}:"), FALLBACK_PREFIX);
     }
 
+    /// Traffic that is not a parsed frame keeps neither the socket nor the component alive: the
+    /// idle timeout reconnects, every reconnect resends the same frame, which refreshes the
+    /// component but cannot move its deadline, and the removal follows.
+    #[rstest]
+    #[case::ping_only(Message::Ping(Vec::new().into()))]
+    #[case::malformed_text(Message::Text("nonsense".into()))]
     #[tokio::test]
-    async fn ping_only_traffic_removes_within_stale_after() {
-        let fake = FakeTitan::spawn(frame_then_repeat(
-            fresh_frame(),
-            Message::Ping(Vec::new().into()),
-            Duration::from_millis(10),
-        ))
-        .await;
+    async fn non_frame_traffic_removes_within_stale_after(#[case] filler: Message) {
+        let fake =
+            FakeTitan::spawn(frame_then_repeat(fresh_frame(), filler, Duration::from_millis(10)))
+                .await;
         let stream = fast_builder(&fake)
             .build()
             .expect("build");
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
-        // Every reconnect resends the same frame, which refreshes the component but cannot move
-        // its deadline.
-        let removal = expect_removal(&mut stream).await;
-
-        assert_removal_only(&removal, 1);
-        assert!(fake.connections.load(Ordering::SeqCst) >= 2, "no reconnect on idle timeout");
-    }
-
-    #[tokio::test]
-    async fn malformed_text_removes_within_stale_after() {
-        let fake = FakeTitan::spawn(frame_then_repeat(
-            fresh_frame(),
-            Message::Text("nonsense".into()),
-            Duration::from_millis(10),
-        ))
-        .await;
-        let stream = fast_builder(&fake)
-            .build()
-            .expect("build");
-        tokio::pin!(stream);
-
-        expect_first_update(&mut stream).await;
-        // Every reconnect resends the same frame, which refreshes the component but cannot move
-        // its deadline.
         let removal = expect_removal(&mut stream).await;
 
         assert_removal_only(&removal, 1);

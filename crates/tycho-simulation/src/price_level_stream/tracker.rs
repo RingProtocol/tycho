@@ -463,7 +463,7 @@ impl FreshnessTracker {
 
     /// Logs the first rejected frame of a streak at WARN and the rest at DEBUG.
     fn log_rejection(&mut self, reason: RejectReason, frame: &TitanPriceLevelMessage) {
-        let reason = reason.as_str();
+        let reason: &'static str = reason.into();
         if self.rejecting {
             tracing::debug!(
                 reason,

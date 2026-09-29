@@ -323,50 +323,25 @@ impl ProtocolSim for PriceLevelStreamState {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        str::FromStr,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use rstest::rstest;
-    use tycho_common::models::Chain;
 
-    use super::*;
+    use super::{
+        super::test_support::{token, USDC, WBTC, WETH},
+        *,
+    };
 
     fn wbtc() -> Token {
-        Token::new(
-            &Bytes::from_str("0x2260fac5e5542a773aa44fbcfedf7c193bc2c599").unwrap(),
-            "WBTC",
-            8,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
+        token(WBTC, "WBTC", 8)
     }
 
     fn usdc() -> Token {
-        Token::new(
-            &Bytes::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap(),
-            "USDC",
-            6,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
+        token(USDC, "USDC", 6)
     }
 
     fn weth() -> Token {
-        Token::new(
-            &Bytes::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap(),
-            "WETH",
-            18,
-            0,
-            &[Some(10_000)],
-            Chain::Ethereum,
-            100,
-        )
+        token(WETH, "WETH", 18)
     }
 
     fn quote(amount_in: u64, amount_out: u64) -> PriceLevelStreamQuote {

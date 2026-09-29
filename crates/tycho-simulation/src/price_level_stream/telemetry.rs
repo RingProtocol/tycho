@@ -5,6 +5,7 @@
 //! its `venue` label carries the address the frame named it by.
 
 use metrics::{counter, gauge, histogram};
+use strum_macros::IntoStaticStr;
 
 /// Counter, no labels. Incremented once per frame the tracker accepts.
 pub(super) const FRAMES_ACCEPTED: &str = "price_level_stream_frames_accepted_total";
@@ -36,8 +37,10 @@ pub(super) const RECONNECTS: &str = "price_level_stream_reconnects_total";
 pub(super) const UNREGISTERED_PAMM_ENTRIES: &str =
     "price_level_stream_unregistered_pamm_entries_total";
 
-/// The `reason` label of [`FRAMES_REJECTED`]: why the stream dropped a frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The `reason` label of [`FRAMES_REJECTED`]: why the stream dropped a frame. The label value
+/// is the variant name in snake case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(super) enum RejectReason {
     /// The text did not parse as a frame.
     ParseError,
@@ -54,21 +57,10 @@ pub(super) enum RejectReason {
     BlockJump,
 }
 
-impl RejectReason {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            RejectReason::ParseError => "parse_error",
-            RejectReason::TooOld => "too_old",
-            RejectReason::InFuture => "in_future",
-            RejectReason::OutOfOrder => "out_of_order",
-            RejectReason::BlockRegression => "block_regression",
-            RejectReason::BlockJump => "block_jump",
-        }
-    }
-}
-
-/// The `reason` label of [`RECONNECTS`]: why the stream gave up on a Titan connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The `reason` label of [`RECONNECTS`]: why the stream gave up on a Titan connection. The
+/// label value is the variant name in snake case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(super) enum ReconnectReason {
     /// No frame parsed within the idle timeout.
     IdleTimeout,
@@ -82,19 +74,6 @@ pub(super) enum ReconnectReason {
     ConnectFailed,
     /// The handshake did not complete within the connect timeout.
     ConnectTimeout,
-}
-
-impl ReconnectReason {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            ReconnectReason::IdleTimeout => "idle_timeout",
-            ReconnectReason::Ended => "ended",
-            ReconnectReason::Closed => "closed",
-            ReconnectReason::ReadError => "read_error",
-            ReconnectReason::ConnectFailed => "connect_failed",
-            ReconnectReason::ConnectTimeout => "connect_timeout",
-        }
-    }
 }
 
 /// The stream's serving state, exported as the numeric value of `SERVING_STATE`.
@@ -111,7 +90,7 @@ pub(super) fn record_frame_accepted() {
 }
 
 pub(super) fn record_frame_rejected(reason: RejectReason) {
-    counter!(FRAMES_REJECTED, "reason" => reason.as_str()).increment(1);
+    counter!(FRAMES_REJECTED, "reason" => <&'static str>::from(reason)).increment(1);
 }
 
 pub(super) fn record_frame_age(age_seconds: f64) {
@@ -135,7 +114,7 @@ pub(super) fn record_serving_state(state: ServingState) {
 }
 
 pub(super) fn record_reconnect(reason: ReconnectReason) {
-    counter!(RECONNECTS, "reason" => reason.as_str()).increment(1);
+    counter!(RECONNECTS, "reason" => <&'static str>::from(reason)).increment(1);
 }
 
 pub(super) fn record_unregistered_pamm() {
@@ -238,8 +217,8 @@ pub(super) mod recorded {
 mod tests {
     use super::{recorded::*, *};
 
-    /// The metric names are the contract with dashboards and alerts, so the lookups spell them
-    /// out instead of reusing the constants the helpers emit under.
+    /// The metric names and label values are the contract with dashboards and alerts, so the
+    /// lookups spell them out instead of reusing the constants and enums the helpers emit under.
     #[test]
     fn every_helper_emits_its_named_metric() {
         let ((), snapshot) = record_async(async {
@@ -304,36 +283,5 @@ mod tests {
             counter_value(&snapshot, "price_level_stream_unregistered_pamm_entries_total", &[]),
             1
         );
-    }
-
-    /// Dashboards match on the label strings, so every variant maps to a distinct one.
-    #[test]
-    fn label_values_are_distinct() {
-        let reject: Vec<&str> = [
-            RejectReason::ParseError,
-            RejectReason::TooOld,
-            RejectReason::InFuture,
-            RejectReason::OutOfOrder,
-            RejectReason::BlockRegression,
-            RejectReason::BlockJump,
-        ]
-        .into_iter()
-        .map(RejectReason::as_str)
-        .collect();
-        let reconnect: Vec<&str> = [
-            ReconnectReason::IdleTimeout,
-            ReconnectReason::Ended,
-            ReconnectReason::Closed,
-            ReconnectReason::ReadError,
-            ReconnectReason::ConnectFailed,
-            ReconnectReason::ConnectTimeout,
-        ]
-        .into_iter()
-        .map(ReconnectReason::as_str)
-        .collect();
-        for values in [reject, reconnect] {
-            let distinct: std::collections::HashSet<&str> = values.iter().copied().collect();
-            assert_eq!(distinct.len(), values.len(), "{values:?}");
-        }
     }
 }

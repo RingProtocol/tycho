@@ -148,14 +148,11 @@ pub(super) fn frame_then_repeat(
             if socket.send(first).await.is_err() {
                 return;
             }
-            loop {
-                if socket
-                    .send(repeat.clone())
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
+            while socket
+                .send(repeat.clone())
+                .await
+                .is_ok()
+            {
                 tokio::time::sleep(interval).await;
             }
         })

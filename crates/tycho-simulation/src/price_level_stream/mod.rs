@@ -102,29 +102,3 @@ mod tracker;
 
 /// The post-merge Ethereum slot. Every freshness window of the stream is a multiple of it.
 const SLOT: Duration = Duration::from_secs(12);
-
-/// The delay before the retry after `attempt` consecutive failures: `2^attempt` seconds, capped
-/// at `max_backoff`.
-fn backoff(attempt: u32, max_backoff: Duration) -> Duration {
-    let exponential = 2u64
-        .checked_pow(attempt)
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::MAX);
-    exponential.min(max_backoff)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backoff_grows_exponentially_up_to_the_cap() {
-        let max_backoff = Duration::from_secs(32);
-        assert_eq!(backoff(1, max_backoff), Duration::from_secs(2));
-        assert_eq!(backoff(4, max_backoff), Duration::from_secs(16));
-        assert_eq!(backoff(5, max_backoff), max_backoff);
-        assert_eq!(backoff(100, max_backoff), max_backoff);
-        // Exponent overflow must saturate to the cap rather than panic.
-        assert_eq!(backoff(u32::MAX, max_backoff), max_backoff);
-    }
-}
