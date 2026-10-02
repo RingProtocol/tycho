@@ -24,7 +24,7 @@ use crate::evm::{
         safe_math::{safe_add_u256, safe_sub_u256},
         u256_num::u256_to_biguint,
         utils::{
-            slipstreams::raw_target_price,
+            slipstreams::{dynamic_fee_module::ZERO_FEE_INDICATOR, raw_target_price},
             uniswap::{
                 liquidity_math,
                 sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
@@ -90,11 +90,13 @@ impl VelodromeSlipstreamsState {
         })
     }
 
+    /// Returns the swap fee in pips. A custom fee of zero means that none is set, and
+    /// [`ZERO_FEE_INDICATOR`] is the value the fee module stores for an explicit zero fee.
     fn get_fee(&self) -> u32 {
-        if self.custom_fee > 0 {
-            self.custom_fee
-        } else {
-            self.default_fee
+        match self.custom_fee {
+            0 => self.default_fee,
+            ZERO_FEE_INDICATOR => 0,
+            custom_fee => custom_fee,
         }
     }
 
@@ -576,6 +578,27 @@ mod tests {
             ticks,
         )
         .expect("Failed to create pool")
+    }
+
+    #[rstest]
+    #[case::no_custom_fee(0, 0.003)]
+    #[case::zero_fee_indicator(420, 0.0)]
+    #[case::custom_fee(500, 0.0005)]
+    fn test_fee_resolves_custom_fee(#[case] custom_fee: u32, #[case] expected: f64) {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).unwrap();
+        let ticks = vec![TickInfo::new(-120, 0).unwrap(), TickInfo::new(120, 0).unwrap()];
+        let pool = VelodromeSlipstreamsState::new(
+            10u128.pow(20),
+            sqrt_price,
+            3000,
+            custom_fee,
+            1,
+            0,
+            ticks,
+        )
+        .unwrap();
+
+        assert_eq!(pool.fee(), expected);
     }
 
     #[test]
