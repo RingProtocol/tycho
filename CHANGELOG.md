@@ -1,3 +1,16 @@
+## [0.435.0](https://github.com/propeller-heads/tycho/compare/0.434.0...0.435.0) (2026-10-02)
+
+
+### Features
+
+* license Tycho under the Fynd License 1.1 ([#1529](https://github.com/propeller-heads/tycho/issues/1529)) ([bd068c7](https://github.com/propeller-heads/tycho/commit/bd068c77571cddf6694e5161a52158a6498e183b))
+* license Tycho under the PropellerHeads License 1.1 ([ef830f3](https://github.com/propeller-heads/tycho/commit/ef830f310f9bca3984a532129c7d14e0c55f4c84))
+
+
+### Bug Fixes
+
+* exclude the licensing check script from its own BUSL search ([a6f00a1](https://github.com/propeller-heads/tycho/commit/a6f00a18b7683689b49c6740aba3fdb23b6e17af))
+
 ## [0.434.0](https://github.com/propeller-heads/tycho/compare/0.433.1...0.434.0) (2026-10-02)
 
 

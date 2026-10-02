@@ -1,6 +1,6 @@
 # Router Registry and Contract Addresses
 
-PropellerHeads designates every chain marked **active** below as a Designated Router deployment for Fynd License 1.0. Every Fynd settlement must target the active TychoRouterV3 for its chain. The router's FeeCalculator is a mandatory dependency. A route must use the listed executor for every protocol operation that it performs.
+PropellerHeads designates every chain marked **active** below as a Designated Router deployment for the Fynd License 1.0 and 1.1. Every settlement under either version must target the active TychoRouterV3 for its chain. The router's FeeCalculator is a mandatory dependency. A route must use the listed executor for every protocol operation that it performs.
 
 The <a href="https://raw.githubusercontent.com/propeller-heads/tycho/main/crates/tycho-execution/config/deployment_registry.json" target="_blank" rel="noopener noreferrer">machine-readable deployment registry</a> contains the same active router, FeeCalculator, and executor addresses, together with effective dates, scheduled successors, and superseded deployments. GitHub preserves the <a href="https://github.com/propeller-heads/tycho/commits/main/crates/tycho-execution/config/deployment_registry.json" target="_blank" rel="noopener noreferrer">registry version history</a>. Send legal and continuity notices to legal@propellerheads.xyz.
 

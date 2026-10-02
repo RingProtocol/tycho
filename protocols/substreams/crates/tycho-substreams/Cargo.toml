@@ -7,7 +7,7 @@ repository = "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/su
 homepage = "https://www.propellerheads.xyz/tycho"
 documentation = "https://docs.propellerheads.xyz/tycho"
 keywords = ["propellerheads", "solver", "defi", "dex", "mev"]
-license = "MIT"
+license-file = "../../../../LICENSE.md"
 categories = ["finance", "wasm"]
 readme = "README.md"
 
