@@ -192,8 +192,8 @@ impl AerodromeSlipstreamsState {
     }
 
     /// Swaps token_in until `spot_price(token_in, token_out)` reaches the middle of the band
-    /// `[target, target * (1 + tolerance)]`. The fee can change during the swap, so the spot
-    /// price can land slightly off the band. Falls back to the numerical search on errors.
+    /// `[target, target * (1 + tolerance)]`. Falls back to numerical search if recording the
+    /// observation changes the fee enough to move the final price outside the band.
     fn swap_to_target_price(
         &self,
         params: &QueryPoolSwapParams,
@@ -230,6 +230,10 @@ impl AerodromeSlipstreamsState {
             new_state.liquidity = result.liquidity;
             new_state.tick = result.tick;
             new_state.sqrt_price = result.sqrt_price;
+        }
+        let final_spot = new_state.spot_price(token_in, token_out)?;
+        if final_spot < target_f64 || final_spot > target_f64 * (1.0 + tolerance) {
+            return crate::evm::query_pool_swap::query_pool_swap(self, params);
         }
         Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
     }
@@ -749,7 +753,27 @@ impl ProtocolSim for AerodromeSlipstreamsState {
                 tolerance,
                 min_amount_in: _,
                 max_amount_in: _,
-            } => self.swap_to_target_price(params, target, *tolerance),
+            } => {
+                let swap = self.swap_to_target_price(params, target, *tolerance)?;
+                let target = price_to_f64_with_decimals(
+                    target,
+                    params.token_in().decimals,
+                    params.token_out().decimals,
+                )?;
+                let spot = swap
+                    .new_state()
+                    .spot_price(params.token_in(), params.token_out())?;
+                if !tolerance.is_finite() ||
+                    *tolerance < 0.0 ||
+                    !(spot >= target && spot <= target * (1.0 + tolerance))
+                {
+                    return Err(SimulationError::RecoverableError(
+                        "Aerodrome target-price search ended outside the requested tolerance"
+                            .into(),
+                    ));
+                }
+                Ok(swap)
+            }
         }
     }
 }
@@ -1282,6 +1306,34 @@ mod tests {
             .get_amount_out(swap.amount_in().clone(), token_in, token_out)
             .unwrap();
         assert_eq!(&quote.amount, swap.amount_out());
+    }
+
+    #[test]
+    fn target_price_revalidates_after_initial_fee_changes() {
+        let mut pool = initial_fee_pool(999_999);
+        pool.ticks = TickList::from(
+            1,
+            vec![TickInfo::new(-1200, 0).unwrap(), TickInfo::new(1200, 0).unwrap()],
+        )
+        .unwrap();
+        let (token_in, token_out) = token_pair();
+        let target = 0.99;
+        let tolerance = 1e-4;
+        let params = target_price_params(
+            &token_in,
+            &token_out,
+            to_price(target, &token_in, &token_out),
+            tolerance,
+        );
+        let swap = pool
+            .query_pool_swap(&params)
+            .expect("search reaches the target using the final fee");
+        let spot = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        assert!(spot >= target && spot <= target * (1.0 + tolerance), "final spot {spot}");
+        assert!(swap.price_points().is_some(), "fee change should trigger numerical search");
     }
 
     /// A target less than half the tolerance below spot puts the swap limit above spot.
