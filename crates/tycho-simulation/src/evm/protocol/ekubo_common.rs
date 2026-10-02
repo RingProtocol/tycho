@@ -34,8 +34,9 @@ pub(crate) trait EkuboSwapToPrice: ProtocolSim + Sized {
 /// Swaps `token_in` until the pool's spot price reaches `target`. `spot_price_fee` is the fee, in
 /// 0.64 fixed point, that `spot_price` marks up.
 ///
-/// Returns a zero swap when the target equals the spot price, or when virtual orders move the
-/// price past the target. Uses the numerical search when the native path cannot reach the target.
+/// Executes virtual orders before checking the target. Returns their advanced state for a zero
+/// user swap when the target equals the resulting price. Uses numerical search for out-of-range
+/// limits or an exhausted native input allowance.
 ///
 /// # Errors
 ///
@@ -49,35 +50,32 @@ pub(crate) fn swap_to_target_price<S: EkuboSwapToPrice>(
     let (token_in, token_out) = (params.token_in(), params.token_out());
     let zero_for_one = token_in.address < token_out.address;
 
+    // Capture virtual execution once; all target decisions and quotes use this state.
+    let (_, _, start_state) = state.quote_to_limit(token_in, 0, None)?;
     let Some(limit) = target_sqrt_ratio(target, zero_for_one, spot_price_fee)
+        .and_then(|ratio| quantize_sqrt_ratio(&ratio, zero_for_one))
         .and_then(|sqrt_ratio| S::sqrt_ratio_in_range(&sqrt_ratio))
     else {
-        return query_pool_swap(state, params);
+        return query_pool_swap(&start_state, params);
     };
-    let current = state.current_sqrt_ratio();
+    let current = start_state.current_sqrt_ratio();
 
     if limit == current {
-        return Ok(zero_swap(state));
+        return Ok(zero_swap(&start_state));
     }
     if !lies_ahead(limit, current, zero_for_one) {
         let target = price_to_f64_with_decimals(target, token_in.decimals, token_out.decimals)?;
-        let spot = state.spot_price(token_in, token_out)?;
+        let spot = start_state.spot_price(token_in, token_out)?;
         return Err(SimulationError::InvalidInput(
             format!("Target price {target} is above spot price {spot}"),
             None,
         ));
     }
 
-    // TWAMM quotes execute virtual orders first, and these can move the price past the target.
-    let (_, _, start_state) = state.quote_to_limit(token_in, 0, None)?;
-    if !lies_ahead(limit, start_state.current_sqrt_ratio(), zero_for_one) {
-        return Ok(zero_swap(state));
-    }
-
     let (consumed, calculated, new_state) =
-        state.quote_to_limit(token_in, i128::MAX, Some(limit))?;
+        start_state.quote_to_limit(token_in, i128::MAX, Some(limit))?;
     if consumed == i128::MAX {
-        return query_pool_swap(state, params);
+        return query_pool_swap(&start_state, params);
     }
 
     Ok(PoolSwap::new(
@@ -86,6 +84,19 @@ pub(crate) fn swap_to_target_price<S: EkuboSwapToPrice>(
         Box::new(new_state),
         None,
     ))
+}
+
+/// Round-trip through Core's 96-bit SqrtRatio encoding (94-bit mantissa, four regions).
+/// The expanded result remains Q128.128 for the SDK. Round toward the legal side of the target.
+fn quantize_sqrt_ratio(ratio: &BigUint, round_up: bool) -> Option<BigUint> {
+    for (bits, shift) in [(96usize, 2usize), (128, 34), (160, 66), (192, 98)] {
+        let step = BigUint::one() << shift;
+        let adjusted = if round_up { ratio + &step - 1u8 } else { ratio.clone() };
+        if adjusted < BigUint::one() << bits {
+            return Some((adjusted >> shift) << shift);
+        }
+    }
+    None
 }
 
 fn lies_ahead<R: Ord>(to: R, from: R, zero_for_one: bool) -> bool {
@@ -237,9 +248,9 @@ pub(crate) mod test_helpers {
         }
     }
 
-    /// Checks a zero swap when the virtual orders alone move the price past the target.
+    /// Checks rejection when virtual orders move the price below the target before the user swap.
     /// `token_in` must be the token that the virtual orders sell.
-    pub(crate) fn assert_virtual_orders_past_target_give_zero_swap(
+    pub(crate) fn assert_virtual_orders_applied_before_direction_check(
         state: &dyn ProtocolSim,
         token_in: &Token,
         token_out: &Token,
@@ -252,11 +263,45 @@ pub(crate) mod test_helpers {
         let target = to_price((pre_spot * post_spot).sqrt(), token_in, token_out);
         let params = target_price_params(token_in, token_out, target, 1e-4);
 
+        assert!(matches!(state.query_pool_swap(&params), Err(SimulationError::InvalidInput(..))));
+
+        // The opposite direction becomes reachable only after virtual execution. The old
+        // pre-state direction check rejected this target before executing virtual orders.
+        let reverse_pre = state
+            .spot_price(token_out, token_in)
+            .unwrap();
+        let reverse_post = probe_spot(state, token_out, token_in);
+        assert!(reverse_post > reverse_pre);
+        let target = to_price((reverse_pre * reverse_post).sqrt(), token_out, token_in);
+        let target_f =
+            price_to_f64_with_decimals(&target, token_out.decimals, token_in.decimals).unwrap();
+        let tolerance = (reverse_post / reverse_pre - 1.0) / 100.0;
+        let params = target_price_params(token_out, token_in, target, tolerance);
         let swap = state
             .query_pool_swap(&params)
-            .expect("native query_pool_swap");
+            .expect("reachable after virtual execution");
+        let price = swap
+            .new_state()
+            .spot_price(token_out, token_in)
+            .unwrap();
+        assert!(price >= target_f * (1.0 - 1e-12) && price <= target_f * (1.0 + tolerance));
+    }
+}
 
-        assert_eq!(swap.amount_in(), &BigUint::ZERO);
-        assert_eq!(swap.amount_out(), &BigUint::ZERO);
+#[cfg(test)]
+mod rounding_tests {
+    use super::*;
+
+    #[test]
+    fn compact_ratio_rounding_at_region_boundaries() {
+        for (bits, shift) in [(96usize, 2usize), (128, 34), (160, 66), (192, 98)] {
+            let boundary = BigUint::one() << bits;
+            let below = &boundary - 1u8;
+            assert_eq!(
+                quantize_sqrt_ratio(&below, false),
+                Some(&boundary - (BigUint::one() << shift))
+            );
+            assert_eq!(quantize_sqrt_ratio(&below, true), (bits < 192).then_some(boundary));
+        }
     }
 }

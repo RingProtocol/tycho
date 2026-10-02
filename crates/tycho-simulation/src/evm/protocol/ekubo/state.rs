@@ -361,6 +361,6 @@ mod tests {
     fn test_query_pool_swap_target_price_virtual_orders_past_target() {
         let case = twamm();
         let state = &case.state_after_transition;
-        assert_virtual_orders_past_target_give_zero_swap(state, &case.token0(), &case.token1());
+        assert_virtual_orders_applied_before_direction_check(state, &case.token0(), &case.token1());
     }
 }
