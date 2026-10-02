@@ -846,7 +846,7 @@ mod tests {
 
     #[rstest]
     #[case::above_spot(1.01, "is above spot price")]
-    #[case::below_limit(0.01, "below reachable limit for curve pool")]
+    #[case::below_limit(1e-9, "below reachable limit for curve pool")]
     fn test_query_pool_swap_unreachable_target(#[case] multiplier: f64, #[case] expected: &str) {
         let (state, token_in, token_out) = v1_two_coin_state();
         let (params, _) = spot_target_params(&state, &token_in, &token_out, multiplier);

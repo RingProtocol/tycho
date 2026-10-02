@@ -14,6 +14,8 @@ const FEE_DENOMINATOR: U256 = U256::from_limbs([10_000_000_000, 0, 0, 0]);
 const MAX_ITERATIONS: usize = 32;
 /// Maximum halvings of the upper search bound when the pool math fails at the full balance.
 const MAX_BOUND_HALVINGS: usize = 4;
+/// Maximum doublings of the upper search bound while the price there stays above the band.
+const MAX_BOUND_DOUBLINGS: usize = 4;
 
 /// Error returned by [`swap_to_price`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -24,7 +26,7 @@ pub enum SwapToPriceError {
     /// Selling coin `i` only lowers the price, so no swap reaches a target above spot.
     #[error("target price is above the current spot price")]
     TargetAboveSpot,
-    /// Selling the pool's whole balance of coin `i` does not lower the price to the target.
+    /// Selling the largest input that the search tries does not lower the price to the target.
     #[error("target price is below the pool's reachable limit")]
     TargetBelowLimit,
     /// The pool math overflowed or failed, or the search ended outside the tolerance band.
@@ -262,32 +264,19 @@ impl<'p> NormalizedStablePool<'p> {
             std::cmp::Ordering::Greater => {}
         }
 
+        let spot_f = fraction_to_f64(&spot).ok_or(SwapToPriceError::MathFailed)?;
+        let price_at = |dx| self.post_swap_price(&xp, d, i, j, dx);
         let (hi, limit_price) = self
             .upper_bound(&xp, d, i, j)
             .ok_or(SwapToPriceError::MathFailed)?;
-        if band.contains(&limit_price) {
-            return Ok(hi);
+        match expand_bound(price_at, &band, spot_f, hi, limit_price)? {
+            SearchStart::InBand(dx) => Ok(dx),
+            SearchStart::Bracket(bracket) => false_position(price_at, &band, bracket),
         }
-        match fraction_cmp(&limit_price, target_num, target_den) {
-            std::cmp::Ordering::Greater => return Err(SwapToPriceError::TargetBelowLimit),
-            std::cmp::Ordering::Equal => return Ok(hi),
-            std::cmp::Ordering::Less => {}
-        }
-
-        let spot_f = fraction_to_f64(&spot).ok_or(SwapToPriceError::MathFailed)?;
-        let limit_f = fraction_to_f64(&limit_price).ok_or(SwapToPriceError::MathFailed)?;
-        let bracket = Bracket {
-            lo: U256::ZERO,
-            hi,
-            g_lo: spot_f - band.aim(),
-            g_hi: limit_f - band.aim(),
-            last_moved: LastMoved::Neither,
-        };
-        false_position(|dx| self.post_swap_price(&xp, d, i, j, dx), &band, bracket)
     }
 
-    /// Returns the upper search bound and the post-swap price there. The bound starts at the
-    /// balance of coin `i`, the soft limit of `get_limits`, and halves while the math fails.
+    /// Returns the first upper search bound and the post-swap price there. The bound starts at
+    /// the balance of coin `i`, the soft limit of `get_limits`, and halves while the math fails.
     fn upper_bound(
         &self,
         xp: &[U256],
@@ -426,6 +415,57 @@ impl<'p> NormalizedStablePool<'p> {
     }
 }
 
+/// Where the search starts after [`expand_bound`].
+enum SearchStart {
+    /// The price at this probed input is already in the band.
+    InBand(U256),
+    Bracket(Bracket),
+}
+
+/// Doubles the upper bound `hi` while the price there stays above the band, because the balance
+/// of coin `i` is a search start and not a protocol limit. Stops at the first bound whose price
+/// is in the band or below the target, or where the pool math fails.
+///
+/// # Errors
+///
+/// Returns [`SwapToPriceError::TargetBelowLimit`] when the price stays above the band after
+/// [`MAX_BOUND_DOUBLINGS`] doublings, or when the bound overflows.
+fn expand_bound(
+    price_at: impl Fn(U256) -> Option<((U256, U256), U256)>,
+    band: &TargetBand,
+    spot: f64,
+    mut hi: U256,
+    mut price: (U256, U256),
+) -> Result<SearchStart, SwapToPriceError> {
+    let mut lo = U256::ZERO;
+    let mut g_lo = spot - band.aim();
+    let mut doublings = 0;
+    loop {
+        if band.contains(&price) {
+            return Ok(SearchStart::InBand(hi));
+        }
+        let g_hi = fraction_to_f64(&price).ok_or(SwapToPriceError::MathFailed)? - band.aim();
+        if fraction_cmp(&price, band.num, band.den) == std::cmp::Ordering::Less {
+            let bracket = Bracket { lo, hi, g_lo, g_hi, last_moved: LastMoved::Neither };
+            return Ok(SearchStart::Bracket(bracket));
+        }
+        if doublings == MAX_BOUND_DOUBLINGS {
+            return Err(SwapToPriceError::TargetBelowLimit);
+        }
+        doublings += 1;
+        (lo, g_lo) = (hi, g_hi);
+        hi = hi
+            .checked_mul(U256::from(2))
+            .ok_or(SwapToPriceError::TargetBelowLimit)?;
+        let Some((next_price, _dy)) = price_at(hi) else {
+            // The crossing can still lie between the last priced bound and this one.
+            let bracket = Bracket { lo, hi, g_lo, g_hi: f64::NAN, last_moved: LastMoved::Neither };
+            return Ok(SearchStart::Bracket(bracket));
+        };
+        price = next_price;
+    }
+}
+
 /// Illinois false position on `g(dx) = price(dx) - aim`, with `g(lo) > 0` and `g(hi) < 0`.
 fn false_position(
     price_at: impl Fn(U256) -> Option<((U256, U256), U256)>,
@@ -483,7 +523,8 @@ impl TargetBand {
     }
 }
 
-/// The search interval `[lo, hi]` and the residuals g(lo) > 0 and g(hi) < 0.
+/// The search interval `[lo, hi]` and the residuals g(lo) > 0 and g(hi) < 0. `g_hi` is NaN when
+/// the pool math fails at `hi`.
 struct Bracket {
     lo: U256,
     hi: U256,
@@ -633,6 +674,65 @@ mod tests {
             &(U256::from(499), U256::from(1000)),
             0.001,
         );
+    }
+
+    #[test]
+    fn expands_bound_past_input_balance() {
+        let pool = Pool::StableSwapV1 {
+            balances: vec![U256::from(10u64).pow(U256::from(24)); 2],
+            rates: vec![U256::from(WAD); 2],
+            amp: U256::from(2000),
+            fee: U256::from(1_000_000),
+        };
+        let target = (U256::from(45), U256::from(100));
+        // The price at dx = the entire input balance is ~0.49907778: above the band.
+        let dx = swap_to_price(&pool, 0, 1, target.0, target.1, 0.001, U256::ZERO).unwrap();
+        assert!(dx > pool.balances()[0], "expected an input above the balance, got {dx}");
+        assert_in_band(&post_swap_spot(&pool, 0, 1, dx), &target, 0.001);
+    }
+
+    /// Price `1 / (1 + dx)` that the math cannot quote above `max_dx`.
+    fn capped_price(max_dx: u64) -> impl Fn(U256) -> Option<((U256, U256), U256)> {
+        move |dx| (dx <= U256::from(max_dx)).then(|| ((U256::ONE, U256::ONE + dx), U256::ONE))
+    }
+
+    fn band(num: u64, den: u64, tolerance: f64) -> TargetBand {
+        TargetBand {
+            num: U256::from(num),
+            den: U256::from(den),
+            target: num as f64 / den as f64,
+            tolerance,
+        }
+    }
+
+    #[test]
+    fn expand_bound_searches_up_to_a_math_failure() {
+        // The first bound is 100. The math fails above 350, and the target 1/301 is at dx = 300.
+        let price_at = capped_price(350);
+        let band = band(1, 301, 0.001);
+        let first = price_at(U256::from(100)).unwrap().0;
+
+        let SearchStart::Bracket(bracket) =
+            expand_bound(&price_at, &band, 1.0, U256::from(100), first).unwrap()
+        else {
+            panic!("expected a bracket");
+        };
+        assert_eq!((bracket.lo, bracket.hi), (U256::from(200), U256::from(400)));
+        assert!(bracket.g_hi.is_nan());
+        assert_eq!(false_position(price_at, &band, bracket), Ok(U256::from(300)));
+    }
+
+    #[test]
+    fn expand_bound_stops_after_max_doublings() {
+        // The first bound is 1, so the last bound is 2^MAX_BOUND_DOUBLINGS = 16.
+        let price_at = capped_price(u64::MAX);
+        let first = price_at(U256::ONE).unwrap().0;
+
+        let reachable = expand_bound(&price_at, &band(1, 17, 0.0), 1.0, U256::ONE, first);
+        assert!(matches!(reachable, Ok(SearchStart::InBand(dx)) if dx == U256::from(16)));
+
+        let unreachable = expand_bound(&price_at, &band(1, 18, 0.0), 1.0, U256::ONE, first);
+        assert!(matches!(unreachable, Err(SwapToPriceError::TargetBelowLimit)));
     }
 
     #[test]
@@ -845,7 +945,7 @@ mod tests {
     fn test_swap_to_price_target_below_limit() {
         let pool = v1_two_coin();
         let current = spot(&pool, 0, 1);
-        let target = (current.0, current.1 * U256::from(100u64));
+        let target = (current.0, current.1 * U256::from(10u64).pow(U256::from(12)));
         let result = swap_to_price(&pool, 0, 1, target.0, target.1, 0.001, U256::ZERO);
         assert_eq!(result, Err(SwapToPriceError::TargetBelowLimit));
     }
