@@ -24,7 +24,7 @@ use crate::evm::{
         curve::{
             adapter::{build_pool, CurveVariant},
             math::Pool,
-            swap_to_price::{swap_to_price, SwapToPriceError},
+            swap_to_price::{exchange, swap_to_price, SwapToPriceError},
             vm,
         },
         u256_num::{biguint_to_u256, u256_to_biguint, u256_to_f64},
@@ -44,11 +44,9 @@ const CRYPTOSWAP_GAS: u64 = 350_000;
 /// directly to a `curve_math` coin index. State (`pool`) is rebuilt from the VM on every
 /// `delta_transition`.
 ///
-/// Multi-hop limitation: the state returned by [`ProtocolSim::get_amount_out`] updates coin
-/// balances only, holding `D` and `price_scale` fixed. This is exact for StableSwap (which
-/// recomputes `D` from balances on every quote), but a route that re-quotes the *same* CryptoSwap
-/// pool sees an approximation on the second hop, because CryptoSwap caches `D` and would update it
-/// (via `tweak_price`) after an on-chain exchange.
+/// StableSwap exchanges update pricing balances net of admin fees and recompute `D` on the
+/// next quote. CryptoSwap updates balances only, holding `D` and `price_scale` fixed: re-quoting
+/// the same CryptoSwap pool is approximate because execution updates these via `tweak_price`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CurveState {
     /// Pool contract address (the Tycho component id).
@@ -61,18 +59,35 @@ pub struct CurveState {
     variant: CurveVariant,
     /// Constructed math pool used for quoting.
     pool: Pool,
+    /// Admin share scaled by 1e10. Absent in old snapshots; legacy StableSwap must refresh.
+    #[serde(default)]
+    admin_fee: Option<U256>,
 }
 
 impl CurveState {
-    /// Construct a `CurveState` from a resolved variant and a built `curve_math::Pool`.
+    /// Construct a pool with its admin fee share (scaled by 1e10). Legacy StableSwap requires
+    /// `Some(admin_fee)` to quote; NG uses its fixed 50% share and CryptoSwap ignores this field.
     pub fn new(
         pool_address: Bytes,
         tokens: Vec<Bytes>,
         decimals: Vec<u8>,
         variant: CurveVariant,
         pool: Pool,
+        admin_fee: Option<U256>,
     ) -> Self {
-        Self { pool_address, tokens, decimals, variant, pool }
+        Self { pool_address, tokens, decimals, variant, pool, admin_fee }
+    }
+
+    fn admin_fee(&self) -> Result<U256, SimulationError> {
+        if self.variant == CurveVariant::StableSwapNG {
+            return Ok(U256::from(5_000_000_000u64));
+        }
+        self.admin_fee.ok_or_else(|| {
+            SimulationError::RecoverableError(format!(
+                "Missing Curve admin fee for {}; refresh the pool state",
+                self.pool_address
+            ))
+        })
     }
 
     fn coin_index(&self, token: &Bytes) -> Result<usize, SimulationError> {
@@ -123,7 +138,15 @@ impl CurveState {
         let target_num = biguint_to_u256(&target.numerator);
         let target_den = biguint_to_u256(&target.denominator);
 
-        match swap_to_price(&self.pool, i, j, target_num, target_den, tolerance) {
+        match swap_to_price(
+            &self.pool,
+            i,
+            j,
+            target_num,
+            target_den,
+            tolerance,
+            if self.is_crypto() { U256::ZERO } else { self.admin_fee()? },
+        ) {
             Ok(dx) => {
                 if dx.is_zero() {
                     let swap = PoolSwap::new(BigUint::ZERO, BigUint::ZERO, self.clone_box(), None);
@@ -201,30 +224,40 @@ impl ProtocolSim for CurveState {
         let j = self.coin_index(&token_out.address)?;
         let dx = biguint_to_u256(&amount_in);
 
-        let dy = self
-            .pool
-            .get_amount_out(i, j, dx)
-            .ok_or_else(|| {
+        let mut new_pool = self.pool.clone();
+        let dy = if self.is_crypto() {
+            let dy = self
+                .pool
+                .get_amount_out(i, j, dx)
+                .ok_or_else(|| {
+                    SimulationError::RecoverableError(format!(
+                        "curve get_amount_out failed for {}",
+                        self.pool_address
+                    ))
+                })?;
+            let balances = self.pool.balances();
+            // CryptoSwap retains its existing balance-only approximation.
+            new_pool
+                .set_balance(i, balances[i] + dx)
+                .map_err(|e| SimulationError::FatalError(e.to_string()))?;
+            new_pool
+                .set_balance(j, balances[j].saturating_sub(dy))
+                .map_err(|e| SimulationError::FatalError(e.to_string()))?;
+            dy
+        } else {
+            let result = exchange(&self.pool, i, j, dx, self.admin_fee()?).ok_or_else(|| {
                 SimulationError::RecoverableError(format!(
-                    "curve get_amount_out failed for {}",
+                    "curve exchange accounting failed for {}",
                     self.pool_address
                 ))
             })?;
-
-        let mut new_pool = self.pool.clone();
-        let (balance_in, balance_out) = {
-            let balances = new_pool.balances();
-            (balances[i], balances[j])
+            for (index, balance) in result.balances.into_iter().enumerate() {
+                new_pool
+                    .set_balance(index, balance)
+                    .map_err(|e| SimulationError::FatalError(e.to_string()))?;
+            }
+            result.amount
         };
-        // Apply the swap to coin balances for multi-hop routing. Stored D / price_scale are kept
-        // as-is (the invariant is preserved across a swap; price_scale only moves on rebalancing),
-        // which is an approximation if the same crypto pool is hit twice within one route.
-        new_pool
-            .set_balance(i, balance_in + dx)
-            .map_err(|e| SimulationError::FatalError(format!("curve set_balance failed: {e}")))?;
-        new_pool
-            .set_balance(j, balance_out.saturating_sub(dy))
-            .map_err(|e| SimulationError::FatalError(format!("curve set_balance failed: {e}")))?;
 
         let new_state = Self { pool: new_pool, ..self.clone() };
         Ok(GetAmountOutResult::new(
@@ -278,7 +311,7 @@ impl ProtocolSim for CurveState {
         _tokens: &std::collections::HashMap<Bytes, Token>,
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
-        self.pool = match delta
+        let state = match delta
             .updated_attributes
             .get(vm::POOL_STATE_ADJUSTED)
         {
@@ -298,16 +331,24 @@ impl ProtocolSim for CurveState {
                     ))
                     .into())
                 }
-                build_pool(&state).map_err(|e| {
-                    SimulationError::FatalError(format!("curve build_pool failed: {e}"))
-                })?
+                state
             }
             None => {
                 let engine = create_engine(SHARED_TYCHO_DB.clone(), false).expect("Infallible");
                 let pool_address = AlloyAddress::from_slice(self.pool_address.as_ref());
-                vm::decode_from_vm(&engine, &pool_address, self.variant, &self.decimals)?
+                vm::read_raw_pool_state(
+                    &engine,
+                    &pool_address,
+                    self.variant,
+                    &self.decimals,
+                    &Default::default(),
+                )?
             }
         };
+        let pool = build_pool(&state)
+            .map_err(|e| SimulationError::FatalError(format!("curve build_pool failed: {e}")))?;
+        self.pool = pool;
+        self.admin_fee = state.admin_fee;
         Ok(())
     }
 
@@ -404,6 +445,7 @@ mod tests {
             DECIMALS.to_vec(),
             VARIANT,
             pool,
+            Some(U256::ZERO),
         )
     }
 
@@ -514,6 +556,7 @@ mod tests {
             decimals,
             variant,
             pool,
+            Some(U256::ZERO),
         )
     }
 
@@ -568,6 +611,53 @@ mod tests {
         (curve_state(pool, CurveVariant::StableSwapMeta, vec![18, 18]), token(0, 18), token(1, 18))
     }
 
+    #[test]
+    fn pending_state_preserves_admin_fee_for_exchange() {
+        let (mut state, token_in, token_out) = v1_two_coin_state();
+        let pool = state.pool.clone();
+        let Pool::StableSwapV1 { balances, rates: _, amp, fee } = pool else { unreachable!() };
+        let raw = RawPoolState {
+            variant: CurveVariant::StableSwapV1,
+            balances,
+            amp,
+            fee: Some(fee),
+            token_decimals: vec![18, 18],
+            admin_fee: Some(U256::from(5_000_000_000u64)),
+            ..Default::default()
+        };
+        state
+            .delta_transition(
+                delta(HashMap::from([(
+                    vm::POOL_STATE_ADJUSTED.into(),
+                    encode_raw_state(&raw).unwrap(),
+                )])),
+                &HashMap::new(),
+                &Balances::default(),
+            )
+            .unwrap();
+        assert_eq!(state.admin_fee, raw.admin_fee);
+        let mut without_admin = state.clone();
+        without_admin.admin_fee = Some(U256::ZERO);
+        let amount = BigUint::from(WAD);
+        let with_fee = state
+            .get_amount_out(amount.clone(), &token_in, &token_out)
+            .unwrap();
+        let no_fee = without_admin
+            .get_amount_out(amount, &token_in, &token_out)
+            .unwrap();
+        assert_eq!(with_fee.amount, no_fee.amount);
+        let balance = |result: &GetAmountOutResult| {
+            result
+                .new_state
+                .as_any()
+                .downcast_ref::<CurveState>()
+                .unwrap()
+                .pool
+                .balances()[1]
+        };
+        assert!(balance(&with_fee) < balance(&no_fee));
+    }
+
     fn two_crypto_ng_state() -> (CurveState, Token, Token) {
         let wad = U256::from(WAD);
         let pool = Pool::TwoCryptoNG {
@@ -603,75 +693,36 @@ mod tests {
     }
 
     #[rstest]
-    #[case::v1_two_coin_shallow(
-        v1_two_coin_state(),
-        0.9999,
-        "3125000000000000000000000",
-        "3124522947233337871723254"
-    )]
-    #[case::v1_two_coin_mid(
-        v1_two_coin_state(),
-        0.999,
-        "20815818212708836884611072",
-        "20807697163651534251587499"
-    )]
-    #[case::v1_two_coin_deep(
-        v1_two_coin_state(),
-        0.99,
-        "40286297791658419910868992",
-        "40222965433174808815786645"
-    )]
-    #[case::v1_mixed_decimals_18_to_6(
-        v1_three_coin_mixed_state(),
-        0.99,
-        "54421390124760608783990784",
-        "54356938367671"
-    )]
-    #[case::v1_mixed_decimals_6_to_18(
-        v1_three_coin_mixed_state_reverse(),
-        0.99,
-        "57262184060825",
-        "57196477819480303708501004"
-    )]
-    #[case::ng_dynamic_fee(
-        ng_dynamic_fee_state(),
-        0.99,
-        "355891912612531093897216",
-        "353717820129267318746246"
-    )]
-    #[case::ng_dynamic_fee_mid(
-        ng_dynamic_fee_state(),
-        0.999,
-        "50618895036072149385216",
-        "50462322642173418701766"
-    )]
-    #[case::meta_virtual_price(
-        meta_state(),
-        0.99,
-        "338629280984993354481664",
-        "327783854710930863303142"
-    )]
-    #[case::meta_virtual_price_mid(
-        meta_state(),
-        0.999,
-        "82316161682654559862784",
-        "79857602923877853762247"
-    )]
+    #[case::v1_two_coin_shallow(v1_two_coin_state(), 0.9999)]
+    #[case::v1_two_coin_mid(v1_two_coin_state(), 0.999)]
+    #[case::v1_two_coin_deep(v1_two_coin_state(), 0.99)]
+    #[case::v1_mixed_decimals_18_to_6(v1_three_coin_mixed_state(), 0.99)]
+    #[case::v1_mixed_decimals_6_to_18(v1_three_coin_mixed_state_reverse(), 0.99)]
+    #[case::ng_dynamic_fee(ng_dynamic_fee_state(), 0.99)]
+    #[case::ng_dynamic_fee_mid(ng_dynamic_fee_state(), 0.999)]
+    #[case::meta_virtual_price(meta_state(), 0.99)]
+    #[case::meta_virtual_price_mid(meta_state(), 0.999)]
     fn test_query_pool_swap_native_amounts(
         #[case] setup: (CurveState, Token, Token),
         #[case] multiplier: f64,
-        #[case] expected_in: &str,
-        #[case] expected_out: &str,
     ) {
         let (state, token_in, token_out) = setup;
-        let (params, _) = spot_target_params(&state, &token_in, &token_out, multiplier);
+        let (params, target) = spot_target_params(&state, &token_in, &token_out, multiplier);
 
         let swap = state
             .query_pool_swap(&params)
             .expect("native query_pool_swap");
 
-        assert_eq!(swap.amount_in().to_string(), expected_in);
-        assert_eq!(swap.amount_out().to_string(), expected_out);
+        let price = swap
+            .new_state()
+            .spot_price(&token_in, &token_out)
+            .unwrap();
+        assert!(price >= target && price <= target * (1.0 + TOLERANCE));
+        let executed = state
+            .get_amount_out(swap.amount_in().clone(), &token_in, &token_out)
+            .unwrap();
+        assert_eq!(swap.amount_out(), &executed.amount);
+        assert!(ProtocolSim::eq(swap.new_state(), executed.new_state.as_ref()));
     }
 
     /// The native result must land in the lower half of the tolerance band, and the numerical

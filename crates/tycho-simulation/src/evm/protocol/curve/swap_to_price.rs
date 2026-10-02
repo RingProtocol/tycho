@@ -55,8 +55,6 @@ struct VariantMath {
     a_precision: U256,
     /// Whether the variant subtracts 1 wei from `xp[j] - y_new` (V1/V2/STETH/NG/Meta).
     minus_one_offset: bool,
-    /// Charges the fee on normalized output (V2 and later) instead of denormalized (V0/V1/ALend).
-    fee_before_denorm: bool,
     /// `(xp_i, xp_j, fee, offpeg_fee_multiplier) -> fee` for NG/ALend.
     dynamic_fee: Option<DynamicFeeFn>,
 }
@@ -66,7 +64,6 @@ const V0_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_v0::get_y,
     a_precision: core::stableswap_v0::A_PRECISION,
     minus_one_offset: false,
-    fee_before_denorm: false,
     dynamic_fee: None,
 };
 
@@ -75,7 +72,6 @@ const V1_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_v1::get_y,
     a_precision: core::stableswap_v1::A_PRECISION,
     minus_one_offset: true,
-    fee_before_denorm: false,
     dynamic_fee: None,
 };
 
@@ -84,7 +80,6 @@ const V2_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_v2::get_y,
     a_precision: core::stableswap_v2::A_PRECISION,
     minus_one_offset: true,
-    fee_before_denorm: true,
     dynamic_fee: None,
 };
 
@@ -93,7 +88,6 @@ const STETH_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_steth::get_y,
     a_precision: core::stableswap_steth::A_PRECISION,
     minus_one_offset: true,
-    fee_before_denorm: true,
     dynamic_fee: None,
 };
 
@@ -102,7 +96,6 @@ const ALEND_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_alend::get_y,
     a_precision: core::stableswap_alend::A_PRECISION,
     minus_one_offset: false,
-    fee_before_denorm: false,
     dynamic_fee: Some(core::stableswap_alend::dynamic_fee),
 };
 
@@ -111,7 +104,6 @@ const NG_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_ng::get_y,
     a_precision: core::stableswap_ng::A_PRECISION,
     minus_one_offset: true,
-    fee_before_denorm: true,
     dynamic_fee: Some(core::stableswap_ng::dynamic_fee),
 };
 
@@ -120,7 +112,6 @@ const META_MATH: VariantMath = VariantMath {
     get_y: core::stableswap_meta::get_y,
     a_precision: core::stableswap_meta::A_PRECISION,
     minus_one_offset: true,
-    fee_before_denorm: true,
     dynamic_fee: None,
 };
 
@@ -133,6 +124,8 @@ struct NormalizedStablePool<'p> {
     fee: U256,
     offpeg_fee_multiplier: U256,
     math: VariantMath,
+    admin_fee: U256,
+    legacy_balance_rounding: bool,
 }
 
 /// Returns the amount of coin `i` to sell so that [`Pool::spot_price`]`(i, j)` lands in
@@ -145,11 +138,40 @@ pub fn swap_to_price(
     target_num: U256,
     target_den: U256,
     tolerance: f64,
+    admin_fee: U256,
 ) -> Result<U256, SwapToPriceError> {
-    let Some(normalized) = NormalizedStablePool::from_pool(pool) else {
+    let Some(mut normalized) = NormalizedStablePool::from_pool(pool) else {
         return Err(SwapToPriceError::UnsupportedVariant);
     };
+    normalized.admin_fee = admin_fee;
     normalized.solve(i, j, target_num, target_den, tolerance)
+}
+
+pub(super) struct StableSwapExchange {
+    pub amount: U256,
+    pub balances: Vec<U256>,
+}
+
+/// StableSwap execution accounting, including the admin share of the output fee.
+pub(super) fn exchange(
+    pool: &Pool,
+    i: usize,
+    j: usize,
+    dx: U256,
+    admin_fee: U256,
+) -> Option<StableSwapExchange> {
+    let mut normalized = NormalizedStablePool::from_pool(pool)?;
+    if i == j ||
+        i >= normalized.balances.len() ||
+        j >= normalized.balances.len() ||
+        admin_fee > FEE_DENOMINATOR
+    {
+        return None;
+    }
+    normalized.admin_fee = admin_fee;
+    let xp = normalized.xp(normalized.balances)?;
+    let d = (normalized.math.get_d)(&xp, normalized.amp)?;
+    normalized.exchange(&xp, d, i, j, dx)
 }
 
 impl<'p> NormalizedStablePool<'p> {
@@ -194,6 +216,8 @@ impl<'p> NormalizedStablePool<'p> {
             fee: *fee,
             offpeg_fee_multiplier,
             math,
+            admin_fee: U256::ZERO,
+            legacy_balance_rounding: matches!(pool, Pool::StableSwapV0 { .. }),
         })
     }
 
@@ -225,6 +249,13 @@ impl<'p> NormalizedStablePool<'p> {
             .price_fraction(&xp, self.balances, d, i, j)
             .ok_or(SwapToPriceError::MathFailed)?;
 
+        let band = TargetBand {
+            num: target_num,
+            den: target_den,
+            target: fraction_to_f64(&(target_num, target_den))
+                .ok_or(SwapToPriceError::MathFailed)?,
+            tolerance,
+        };
         match fraction_cmp(&spot, target_num, target_den) {
             std::cmp::Ordering::Less => return Err(SwapToPriceError::TargetAboveSpot),
             std::cmp::Ordering::Equal => return Ok(U256::ZERO),
@@ -234,19 +265,15 @@ impl<'p> NormalizedStablePool<'p> {
         let (hi, limit_price) = self
             .upper_bound(&xp, d, i, j)
             .ok_or(SwapToPriceError::MathFailed)?;
+        if band.contains(&limit_price) {
+            return Ok(hi);
+        }
         match fraction_cmp(&limit_price, target_num, target_den) {
             std::cmp::Ordering::Greater => return Err(SwapToPriceError::TargetBelowLimit),
             std::cmp::Ordering::Equal => return Ok(hi),
             std::cmp::Ordering::Less => {}
         }
 
-        let band = TargetBand {
-            num: target_num,
-            den: target_den,
-            target: fraction_to_f64(&(target_num, target_den))
-                .ok_or(SwapToPriceError::MathFailed)?,
-            tolerance,
-        };
         let spot_f = fraction_to_f64(&spot).ok_or(SwapToPriceError::MathFailed)?;
         let limit_f = fraction_to_f64(&limit_price).ok_or(SwapToPriceError::MathFailed)?;
         let bracket = Bracket {
@@ -290,18 +317,26 @@ impl<'p> NormalizedStablePool<'p> {
             .collect()
     }
 
-    /// Quotes the output for `dx` like the variant's `get_amount_out`, with the given `d`.
-    fn quote(&self, xp: &[U256], d: U256, i: usize, j: usize, dx: U256) -> Option<U256> {
+    fn exchange(
+        &self,
+        xp: &[U256],
+        d: U256,
+        i: usize,
+        j: usize,
+        dx: U256,
+    ) -> Option<StableSwapExchange> {
         if dx.is_zero() {
-            return Some(U256::ZERO);
+            return Some(StableSwapExchange {
+                amount: U256::ZERO,
+                balances: self.balances.to_vec(),
+            });
         }
         let x_new = xp[i].checked_add(dx.checked_mul(self.rates[i])? / PRECISION)?;
         let y_new = (self.math.get_y)(i, j, x_new, xp, d, self.amp)?;
-        if xp[j] <= y_new {
-            return None;
-        }
-        let offset = if self.math.minus_one_offset { U256::from(1) } else { U256::ZERO };
-        let gross = (xp[j] - y_new).checked_sub(offset)?;
+        let offset = if self.math.minus_one_offset { U256::ONE } else { U256::ZERO };
+        let gross = xp[j]
+            .checked_sub(y_new)?
+            .checked_sub(offset)?;
         let fee_rate = match self.math.dynamic_fee {
             Some(dynamic_fee) => dynamic_fee(
                 xp[i].checked_add(x_new)? / U256::from(2),
@@ -311,22 +346,31 @@ impl<'p> NormalizedStablePool<'p> {
             ),
             None => self.fee,
         };
-        if self.math.fee_before_denorm {
-            let fee_amount = fee_rate.checked_mul(gross)? / FEE_DENOMINATOR;
-            Some(
-                gross
-                    .checked_sub(fee_amount)?
-                    .checked_mul(PRECISION)? /
-                    self.rates[j],
-            )
+        // exchange charges fees in normalized units, even where get_dy denormalizes first.
+        let fee = fee_rate.checked_mul(gross)? / FEE_DENOMINATOR;
+        let admin = fee.checked_mul(self.admin_fee)? / FEE_DENOMINATOR;
+        let amount = gross
+            .checked_sub(fee)?
+            .checked_mul(PRECISION)? /
+            self.rates[j];
+        let mut balances = self.balances.to_vec();
+        if self.legacy_balance_rounding {
+            balances[i] = x_new.checked_mul(PRECISION)? / self.rates[i];
+            balances[j] = y_new
+                .checked_add(fee.checked_sub(admin)?)?
+                .checked_mul(PRECISION)? /
+                self.rates[j];
         } else {
-            let dy = gross.checked_mul(PRECISION)? / self.rates[j];
-            let fee_amount = fee_rate.checked_mul(dy)? / FEE_DENOMINATOR;
-            dy.checked_sub(fee_amount)
+            let admin = admin.checked_mul(PRECISION)? / self.rates[j];
+            balances[i] = balances[i].checked_add(dx)?;
+            balances[j] = balances[j]
+                .checked_sub(amount)?
+                .checked_sub(admin)?;
         }
+        Some(StableSwapExchange { amount, balances })
     }
 
-    /// Returns the post-swap `Pool::spot_price` and the swap output for `dx`.
+    /// Returns the post-exchange marginal price, using balances net of admin fees.
     fn post_swap_price(
         &self,
         xp: &[U256],
@@ -335,17 +379,11 @@ impl<'p> NormalizedStablePool<'p> {
         j: usize,
         dx: U256,
     ) -> Option<((U256, U256), U256)> {
-        let dy = self.quote(xp, d, i, j, dx)?;
-        let mut post_balances = self.balances.to_vec();
-        post_balances[i] = post_balances[i].checked_add(dx)?;
-        post_balances[j] = post_balances[j].checked_sub(dy)?;
-        if post_balances[j].is_zero() {
-            return None;
-        }
-        let post_xp = self.xp(&post_balances)?;
+        let exchange = self.exchange(xp, d, i, j, dx)?;
+        let post_xp = self.xp(&exchange.balances)?;
         let post_d = (self.math.get_d)(&post_xp, self.amp)?;
-        let price = self.price_fraction(&post_xp, &post_balances, post_d, i, j)?;
-        Some((price, dy))
+        let price = self.price_fraction(&post_xp, &exchange.balances, post_d, i, j)?;
+        Some((price, exchange.amount))
     }
 
     /// Returns the spot price dy/dx, fee included, as `(numerator, denominator)`.
@@ -429,6 +467,12 @@ struct TargetBand {
 }
 
 impl TargetBand {
+    fn contains(&self, price: &(U256, U256)) -> bool {
+        fraction_cmp(price, self.num, self.den) != std::cmp::Ordering::Less &&
+            fraction_to_f64(price)
+                .is_some_and(|price| price <= self.target * (1.0 + self.tolerance))
+    }
+
     /// Accepts only the lower half of the band, so caller-side f64 rounding stays in the band.
     fn accept_upper(&self) -> f64 {
         self.target * (1.0 + 0.5 * self.tolerance)
@@ -572,6 +616,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn accepts_endpoint_inside_full_tolerance_band() {
+        let pool = Pool::StableSwapV1 {
+            balances: vec![U256::from(10u64).pow(U256::from(24)); 2],
+            rates: vec![U256::from(WAD); 2],
+            amp: U256::from(2000),
+            fee: U256::from(1_000_000),
+        };
+        // The price at dx = the entire input balance is ~0.49907778: above target, in band.
+        let dx = swap_to_price(&pool, 0, 1, U256::from(499), U256::from(1000), 0.001, U256::ZERO)
+            .unwrap();
+        assert_eq!(dx, pool.balances()[0]);
+        assert_in_band(
+            &post_swap_spot(&pool, 0, 1, dx),
+            &(U256::from(499), U256::from(1000)),
+            0.001,
+        );
+    }
+
+    #[test]
+    fn ng_exchange_deducts_admin_share_from_pricing_balance() {
+        let wad24 = U256::from(10u64).pow(U256::from(24));
+        let pool = Pool::StableSwapNG {
+            balances: vec![wad24, wad24 * U256::from(2)],
+            rates: vec![U256::from(WAD); 2],
+            amp: U256::from(100000),
+            fee: U256::from(50_000_000),
+            offpeg_fee_multiplier: U256::from(1_000_000_000_000u64),
+        };
+        let dx = U256::from(5_000u64) * U256::from(WAD);
+        let result = exchange(&pool, 0, 1, dx, U256::from(5_000_000_000u64)).unwrap();
+        // Independent NG review vector: floor(floor(gross * dynamic_fee / 1e10) / 2).
+        let admin = U256::from(14_039_380_074_488_993_917u128);
+        assert_eq!(result.balances[0], wad24 + dx);
+        assert_eq!(result.balances[1], wad24 * U256::from(2) - result.amount - admin);
+        let no_admin = exchange(&pool, 0, 1, dx, U256::ZERO).unwrap();
+        assert_eq!(no_admin.amount, result.amount);
+        assert_eq!(no_admin.balances[1] - result.balances[1], admin);
+    }
+
     fn v2_two_coin() -> Pool {
         Pool::StableSwapV2 {
             balances: vec![U256::from(50_000_000u128 * WAD), U256::from(48_000_000u128 * WAD)],
@@ -644,15 +728,12 @@ mod tests {
     }
 
     fn post_swap_spot(pool: &Pool, i: usize, j: usize, dx: U256) -> (U256, U256) {
-        let dy = pool
-            .get_amount_out(i, j, dx)
-            .expect("get_amount_out");
+        let result = exchange(pool, i, j, dx, U256::ZERO).unwrap();
         let mut post = pool.clone();
-        let balances = post.balances().to_vec();
-        post.set_balance(i, balances[i] + dx)
-            .expect("set balance in");
-        post.set_balance(j, balances[j] - dy)
-            .expect("set balance out");
+        for (index, balance) in result.balances.into_iter().enumerate() {
+            post.set_balance(index, balance)
+                .unwrap();
+        }
         spot(&post, i, j)
     }
 
@@ -698,7 +779,7 @@ mod tests {
         let current = spot(&pool, i, j);
         let target = scaled_target(&current, multiplier);
 
-        let dx = swap_to_price(&pool, i, j, target.0, target.1, tolerance)
+        let dx = swap_to_price(&pool, i, j, target.0, target.1, tolerance, U256::ZERO)
             .expect("solver should converge");
         assert!(dx > U256::ZERO, "expected a non-zero swap amount");
 
@@ -733,12 +814,13 @@ mod tests {
                 );
                 for divisor in [1_000_000u64, 1_000, 10] {
                     let dx = pool.balances()[i] / U256::from(divisor);
-                    let quote = normalized.quote(&xp, d, i, j, dx);
-                    assert_eq!(
-                        quote,
-                        pool.get_amount_out(i, j, dx),
-                        "quote differs for {i} -> {j}"
-                    );
+                    let quote = normalized
+                        .exchange(&xp, d, i, j, dx)
+                        .map(|result| result.amount);
+                    // Some get_dy variants denormalize before taking fees; exchange does it after.
+                    let quoted = pool.get_amount_out(i, j, dx).unwrap();
+                    let executed = quote.unwrap();
+                    assert!(quoted.abs_diff(executed) <= U256::ONE, "quote differs for {i} -> {j}");
                     let (price, dy) = normalized
                         .post_swap_price(&xp, d, i, j, dx)
                         .expect("post-swap price");
@@ -755,7 +837,7 @@ mod tests {
     fn test_swap_to_price_target_above_spot(#[case] pool: Pool) {
         let current = spot(&pool, 0, 1);
         let target = scaled_target(&current, 1.01);
-        let result = swap_to_price(&pool, 0, 1, target.0, target.1, 0.001);
+        let result = swap_to_price(&pool, 0, 1, target.0, target.1, 0.001, U256::ZERO);
         assert_eq!(result, Err(SwapToPriceError::TargetAboveSpot));
     }
 
@@ -764,7 +846,7 @@ mod tests {
         let pool = v1_two_coin();
         let current = spot(&pool, 0, 1);
         let target = (current.0, current.1 * U256::from(100u64));
-        let result = swap_to_price(&pool, 0, 1, target.0, target.1, 0.001);
+        let result = swap_to_price(&pool, 0, 1, target.0, target.1, 0.001, U256::ZERO);
         assert_eq!(result, Err(SwapToPriceError::TargetBelowLimit));
     }
 
@@ -779,7 +861,7 @@ mod tests {
         #[case] target_num: U256,
         #[case] target_den: U256,
     ) {
-        let result = swap_to_price(&v1_two_coin(), i, j, target_num, target_den, 0.001);
+        let result = swap_to_price(&v1_two_coin(), i, j, target_num, target_den, 0.001, U256::ZERO);
         assert!(
             matches!(result, Err(SwapToPriceError::InvalidInput(_))),
             "expected InvalidInput, got {result:?}"
@@ -819,7 +901,8 @@ mod tests {
     fn test_swap_to_price_target_equal_to_spot() {
         let pool = v1_two_coin();
         let current = spot(&pool, 0, 1);
-        let dx = swap_to_price(&pool, 0, 1, current.0, current.1, 0.001).expect("equal target");
+        let dx = swap_to_price(&pool, 0, 1, current.0, current.1, 0.001, U256::ZERO)
+            .expect("equal target");
         assert_eq!(dx, U256::ZERO);
     }
 
@@ -837,7 +920,8 @@ mod tests {
             out_fee: U256::from(30_000_000u64),
             fee_gamma: U256::from(230_000_000_000_000u64),
         };
-        let result = swap_to_price(&pool, 0, 1, U256::from(1u64), U256::from(2u64), 0.001);
+        let result =
+            swap_to_price(&pool, 0, 1, U256::from(1u64), U256::from(2u64), 0.001, U256::ZERO);
         assert_eq!(result, Err(SwapToPriceError::UnsupportedVariant));
     }
 
@@ -846,7 +930,7 @@ mod tests {
         let pool = v1_two_coin();
         let current = spot(&pool, 0, 1);
         let target = scaled_target(&current, 0.999);
-        let dx = swap_to_price(&pool, 0, 1, target.0, target.1, 0.0)
+        let dx = swap_to_price(&pool, 0, 1, target.0, target.1, 0.0, U256::ZERO)
             .expect("swap_to_price failed with zero tolerance");
         assert!(dx > U256::ZERO);
         let post = post_swap_spot(&pool, 0, 1, dx);
