@@ -357,6 +357,12 @@ mod tests {
         assert_out_of_range_falls_back(state, &full_range.token0(), &full_range.token1());
     }
 
+    #[rstest]
+    fn test_query_pool_swap_target_price_empty_pool(full_range: TestCase) {
+        let state = empty_full_range_state();
+        assert_missed_limit_falls_back(&state, &full_range.token0(), &full_range.token1());
+    }
+
     #[test]
     fn test_query_pool_swap_target_price_virtual_orders_past_target() {
         let case = twamm();

@@ -36,7 +36,7 @@ pub(crate) trait EkuboSwapToPrice: ProtocolSim + Sized {
 ///
 /// Executes virtual orders before checking the target. Returns their advanced state for a zero
 /// user swap when the target equals the resulting price. Uses numerical search for out-of-range
-/// limits or an exhausted native input allowance.
+/// limits, an exhausted native input allowance, or a quote that stops before the limit.
 ///
 /// # Errors
 ///
@@ -74,7 +74,9 @@ pub(crate) fn swap_to_target_price<S: EkuboSwapToPrice>(
 
     let (consumed, calculated, new_state) =
         start_state.quote_to_limit(token_in, i128::MAX, Some(limit))?;
-    if consumed == i128::MAX {
+    // Unused input does not prove that the quote reached the limit: a pool with no liquidity
+    // consumes nothing and stays at its price.
+    if consumed == i128::MAX || new_state.current_sqrt_ratio() != limit {
         return query_pool_swap(&start_state, params);
     }
 
@@ -244,6 +246,28 @@ pub(crate) mod test_helpers {
             let native = state.query_pool_swap(&params);
             let numerical = query_pool_swap::query_pool_swap(state, &params);
 
+            assert_eq!(format!("{native:?}"), format!("{numerical:?}"));
+        }
+    }
+
+    /// Checks that a pool with no liquidity, whose quote stops before the limit, gives the
+    /// numerical search result and not a swap that leaves the price unchanged.
+    pub(crate) fn assert_missed_limit_falls_back(
+        state: &dyn ProtocolSim,
+        token0: &Token,
+        token1: &Token,
+    ) {
+        for (token_in, token_out) in [(token0, token1), (token1, token0)] {
+            let spot = state
+                .spot_price(token_in, token_out)
+                .unwrap();
+            let target = to_price(spot * 0.99, token_in, token_out);
+            let params = target_price_params(token_in, token_out, target, 1e-4);
+
+            let native = state.query_pool_swap(&params);
+            let numerical = query_pool_swap::query_pool_swap(state, &params);
+
+            assert!(native.is_err(), "an empty pool cannot reach the target, got {native:?}");
             assert_eq!(format!("{native:?}"), format!("{numerical:?}"));
         }
     }
