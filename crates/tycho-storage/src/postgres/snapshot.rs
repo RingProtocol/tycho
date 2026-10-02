@@ -13,7 +13,11 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDateTime;
-use diesel::{pg::Pg, sql_types::BigInt, BoolExpressionMethods, ExpressionMethods, QueryDsl};
+use diesel::{
+    pg::Pg,
+    sql_types::{BigInt, Text},
+    BoolExpressionMethods, ExpressionMethods, QueryDsl,
+};
 use diesel_async::{pg::TransactionBuilder, AsyncPgConnection, RunQueryDsl};
 use tycho_common::{
     models::{
@@ -36,6 +40,35 @@ pub(crate) fn snapshot_transaction(
     conn.build_transaction()
         .read_only()
         .repeatable_read()
+}
+
+/// Longest one snapshot read may run before Postgres cancels it.
+const SNAPSHOT_STATEMENT_TIMEOUT: &str = "10min";
+
+/// How often Postgres checks that the client is still connected while a snapshot read runs. A read
+/// that builds a hash or sorts writes nothing to the socket, so without this check it keeps running
+/// after the client is gone.
+const SNAPSHOT_CONNECTION_CHECK_INTERVAL: &str = "10s";
+
+/// Bounds every later read of the current transaction: a statement is cancelled after
+/// [`SNAPSHOT_STATEMENT_TIMEOUT`], and stops within [`SNAPSHOT_CONNECTION_CHECK_INTERVAL`] of the
+/// client disconnecting. The settings end with the transaction, so the pooled connection keeps its
+/// own.
+pub(crate) async fn bound_snapshot_reads(
+    conn: &mut AsyncPgConnection,
+) -> Result<(), PostgresError> {
+    for (name, value) in [
+        ("statement_timeout", SNAPSHOT_STATEMENT_TIMEOUT),
+        ("client_connection_check_interval", SNAPSHOT_CONNECTION_CHECK_INTERVAL),
+    ] {
+        diesel::sql_query("SELECT set_config($1, $2, true)")
+            .bind::<Text, _>(name)
+            .bind::<Text, _>(value)
+            .execute(conn)
+            .await
+            .map_err(PostgresError::from)?;
+    }
+    Ok(())
 }
 
 /// Subquery for the ids of the live accounts of a chain: not deleted, with a live code row.
@@ -1015,6 +1048,47 @@ mod test_serial_db {
                 WriteTimestamp::new(created),
                 "the creation block of p2 is at half past midnight"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bound_snapshot_reads_applies_only_inside_the_transaction_serial_db() {
+        run_against_db(|pool| async move {
+            let mut conn = pool.get().await.unwrap();
+            let setting = |name: &'static str| {
+                diesel::select(diesel::dsl::sql::<Text>(&format!("current_setting('{name}')")))
+            };
+            let before = setting("statement_timeout")
+                .get_result::<String>(&mut conn)
+                .await
+                .unwrap();
+
+            let inside = snapshot_transaction(&mut conn)
+                .run(|conn| {
+                    async move {
+                        bound_snapshot_reads(conn).await?;
+                        let timeout = setting("statement_timeout")
+                            .get_result::<String>(conn)
+                            .await
+                            .map_err(PostgresError::from)?;
+                        let check = setting("client_connection_check_interval")
+                            .get_result::<String>(conn)
+                            .await
+                            .map_err(PostgresError::from)?;
+                        Result::<_, PostgresError>::Ok((timeout, check))
+                    }
+                    .scope_boxed()
+                })
+                .await
+                .unwrap();
+            let after = setting("statement_timeout")
+                .get_result::<String>(&mut conn)
+                .await
+                .unwrap();
+
+            assert_eq!(inside, ("10min".to_string(), "10s".to_string()));
+            assert_eq!(after, before, "the pooled connection keeps its own timeout");
         })
         .await;
     }
