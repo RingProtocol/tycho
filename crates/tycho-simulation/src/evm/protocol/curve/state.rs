@@ -5,6 +5,7 @@ use std::any::Any;
 use alloy::primitives::{Address as AlloyAddress, U256};
 use num_bigint::{BigUint, ToBigUint};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use tycho_common::{
     dto::ProtocolStateDelta,
     models::token::Token,
@@ -122,7 +123,8 @@ impl CurveState {
     }
 
     /// Finds the swap to `target` with the native solver. Returns `None` when the target does not
-    /// fit in U256, the variant has no native solver, or the solver's math fails.
+    /// fit in U256 or the variant has no native solver. Also returns `None`, and logs the reason,
+    /// when the solver's math fails.
     fn swap_to_target_price(
         &self,
         token_in: &Token,
@@ -177,7 +179,15 @@ impl CurveState {
                 format!("{err} for curve pool {pool}", pool = self.pool_address),
                 None,
             )),
-            Err(SwapToPriceError::UnsupportedVariant | SwapToPriceError::MathFailed) => Ok(None),
+            Err(SwapToPriceError::UnsupportedVariant) => Ok(None),
+            Err(err @ SwapToPriceError::MathFailed) => {
+                debug!(
+                    pool = %self.pool_address,
+                    %err,
+                    "Curve native swap-to-price failed; using the numerical search"
+                );
+                Ok(None)
+            }
         }
     }
 }
