@@ -33,6 +33,7 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
+        state::service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
     },
 };
 
@@ -113,6 +114,8 @@ pub struct RpcHandler<G, T> {
     /// `protocol_systems` response so clients can skip entrypoint requests for non-DCI protocols.
     dci_protocols: Vec<String>,
     protocol_systems: Vec<String>,
+    /// Which path answers state requests. `Off` without extractors.
+    state_service: EntityCacheSetup<Arc<StateService>>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -166,6 +169,29 @@ where
             plans_config,
             dci_protocols,
             protocol_systems,
+            state_service: EntityCacheSetup::Off,
+        }
+    }
+
+    /// Sets which path answers the state endpoints.
+    pub(crate) fn with_state_service(
+        mut self,
+        state_service: EntityCacheSetup<Arc<StateService>>,
+    ) -> Self {
+        if matches!(state_service, EntityCacheSetup::Serve(_)) {
+            register_db_path_counters();
+        }
+        self.state_service = state_service;
+        self
+    }
+
+    /// The state service, when it answers requests itself: `serve` mode only.
+    fn serving_state_service(&self) -> Option<&StateService> {
+        match &self.state_service {
+            EntityCacheSetup::Serve(service) => Some(service),
+            // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
+            // it with the database answer.
+            EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
         }
     }
 
@@ -245,10 +271,27 @@ where
         }
         self.contract_storage_cache
             .get(request.clone(), |r| async {
-                self.get_contract_state_inner(r)
+                self.get_contract_state_routed(r)
                     .await
                     .map(|res| (res, true))
             })
+            .await
+    }
+
+    /// Answers from the entity cache when it serves and can serve this request, otherwise from
+    /// the database path.
+    async fn get_contract_state_routed(
+        &self,
+        request: dto::StateRequestBody,
+    ) -> Result<dto::StateRequestResponse, RpcError> {
+        if let Some(service) = self.serving_state_service() {
+            match service.contract_state(&request) {
+                Ok(response) => return Ok(response),
+                Err(StateServiceError::Fallback(reason)) => count_db_path("contract_state", reason),
+                Err(err) => return Err(err.into()),
+            }
+        }
+        self.get_contract_state_inner(request)
             .await
     }
 
@@ -469,10 +512,27 @@ where
         }
         self.protocol_state_cache
             .get(request.clone(), |r| async {
-                self.get_protocol_state_inner(r)
+                self.get_protocol_state_routed(r)
                     .await
                     .map(|res| (res, true))
             })
+            .await
+    }
+
+    /// Answers from the entity cache when it serves and can serve this request, otherwise from
+    /// the database path.
+    async fn get_protocol_state_routed(
+        &self,
+        request: dto::ProtocolStateRequestBody,
+    ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
+        if let Some(service) = self.serving_state_service() {
+            match service.protocol_state(&request) {
+                Ok(response) => return Ok(response),
+                Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
+                Err(err) => return Err(err.into()),
+            }
+        }
+        self.get_protocol_state_inner(request)
             .await
     }
 
@@ -517,8 +577,7 @@ where
                 };
                 let protocol_components = self
                     .get_protocol_components_inner(req)
-                    .await
-                    .expect("Failed to get protocol component IDs");
+                    .await?;
                 let total_components = protocol_components.pagination.total;
                 (
                     protocol_components
@@ -1122,6 +1181,48 @@ where
     }
 }
 
+/// The response to a state service failure: the body the database path returns for the same
+/// failure.
+impl From<StateServiceError> for RpcError {
+    fn from(err: StateServiceError) -> Self {
+        match err {
+            // The routing match answers a fallback from the database path before converting.
+            StateServiceError::Fallback(reason) => {
+                RpcError::Unknown(format!("Unhandled entity cache fallback: {reason:?}"))
+            }
+            StateServiceError::InvalidVersion(reason) => RpcError::Parse(reason),
+            StateServiceError::VersionAboveTip(version) => RpcError::Storage(
+                StorageError::NotFound("Version".to_string(), format!("{version:?}")),
+            ),
+            StateServiceError::ContractNotFound(address) => RpcError::Storage(
+                StorageError::NotFound("Contract".to_string(), address.to_string()),
+            ),
+            StateServiceError::LockPoisoned { system, reason } => {
+                PendingDeltasError::LockError(system, reason).into()
+            }
+            StateServiceError::WindowRead(err) => PendingDeltasError::from(err).into(),
+            StateServiceError::Merge(err) => PendingDeltasError::from(err).into(),
+        }
+    }
+}
+
+/// Counts a state request the entity cache handed to the database path.
+fn count_db_path(endpoint: &'static str, reason: FallbackReason) {
+    metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+        .increment(1);
+}
+
+/// Registers every `db_path_requests` series at zero. Alerts read the first value of a new series
+/// as growth, so a series that first appears on its first fallback would fire them.
+fn register_db_path_counters() {
+    for endpoint in ["contract_state", "protocol_state"] {
+        for reason in FallbackReason::ALL {
+            metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
+                .increment(0);
+        }
+    }
+}
+
 /// Retrieve contract states
 ///
 /// This endpoint retrieves the state of contracts within a specific execution environment. If no
@@ -1521,7 +1622,7 @@ mod tests {
                 AddressStorageLocation, EntryPoint, EntryPointWithTracingParams, RPCTracerParams,
                 TracingParams, TracingResult,
             },
-            contract::Account,
+            contract::{Account, AccountDelta},
             protocol::{ProtocolComponent, ProtocolComponentState},
             token::Token,
             ChangeType,
@@ -1534,7 +1635,14 @@ mod tests {
     };
 
     use super::*;
-    use crate::testing::{evm_contract_slots, MockGateway};
+    use crate::{
+        extractor::models::fixtures,
+        services::state::{
+            cache::EntityCache,
+            window::{new_windows, WindowConfig},
+        },
+        testing::{self, evm_contract_slots, MockGateway},
+    };
 
     const WETH: &str = "C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
@@ -1769,6 +1877,251 @@ mod tests {
         assert_eq!(state.accounts[0], expected.into());
         assert_eq!(state.accounts[1], buf_expected.into());
         assert_eq!(state.pagination.total, 2);
+    }
+
+    /// In serve mode a request without ids is answered by the database path, which lists every
+    /// contract; the cache serves explicit ids only.
+    #[tokio::test]
+    async fn test_get_contract_state_without_ids_uses_the_database_in_serve_mode() {
+        let account = Account::new(
+            Chain::Ethereum,
+            Bytes::from(1u64).lpad(20, 0),
+            "account".to_owned(),
+            evm_contract_slots([(0, 2)]),
+            Bytes::from(101u8).lpad(32, 0),
+            HashMap::new(),
+            Bytes::from("C0C0C0"),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            Bytes::zero(32),
+            None,
+        );
+        let mut gw = MockGateway::new();
+        let mock_response = Ok(WithTotal { entity: vec![account.clone()], total: Some(1) });
+        gw.expect_get_contracts()
+            .return_once(|_, _, _, _, _| Box::pin(async move { mock_response }));
+        let service = StateService::new(
+            new_windows(["uniswap_v2"], WindowConfig::default()),
+            Arc::new(EntityCache::new()),
+        );
+        let req_handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(EntityCacheSetup::Serve(Arc::new(service)));
+
+        let request = dto::StateRequestBody {
+            contract_ids: None,
+            protocol_system: "uniswap_v2".to_string(),
+            version: dto::VersionParam { timestamp: Some(Utc::now().naive_utc()), block: None },
+            chain: dto::Chain::Ethereum,
+            pagination: dto::PaginationParams::default(),
+        };
+        let state = req_handler
+            .get_contract_state_routed(request)
+            .await
+            .unwrap();
+
+        assert_eq!(state.accounts, vec![account.into()]);
+        assert_eq!(state.pagination.total, 1);
+    }
+
+    /// Which path answers a state request, by entity cache mode.
+    #[derive(Clone, Copy, Debug)]
+    enum CacheMode {
+        Serve,
+        Shadow,
+    }
+
+    /// A handler whose state service holds one `ex` window with blocks 5 and 6: account
+    /// `0x..01` and component `c1` are created in block 5. The cache starts empty. Without
+    /// expectations, `gw` panics on any database call.
+    fn state_routing_handler(
+        gw: MockGateway,
+        mode: CacheMode,
+    ) -> RpcHandler<MockGateway, MockEntryPointTracer> {
+        let windows = new_windows(["ex"], WindowConfig::default());
+        let address = Bytes::from(1u64).lpad(20, 0);
+        for n in 5..=6 {
+            let mut block = testing::aggregated_changes("ex", n, n, Some(n));
+            let change = if n == 5 { ChangeType::Creation } else { ChangeType::Update };
+            block.account_deltas.insert(
+                address.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    address.clone(),
+                    fixtures::optional_slots([(1, n)]),
+                    Some(Bytes::from(n)),
+                    Some(Bytes::from("0x6000")),
+                    change,
+                ),
+            );
+            let block = testing::with_state_delta(block, "c1", n);
+            windows["ex"]
+                .lock()
+                .unwrap()
+                .insert(&Arc::new(block))
+                .unwrap();
+        }
+        let service = Arc::new(StateService::new(windows, Arc::new(EntityCache::new())));
+        let setup = match mode {
+            CacheMode::Serve => EntityCacheSetup::Serve(service),
+            CacheMode::Shadow => EntityCacheSetup::Shadow(service),
+        };
+        RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        )
+        .with_state_service(setup)
+    }
+
+    /// A request without ids lists the component ids first; a failure there keeps its status.
+    #[tokio::test]
+    async fn test_get_protocol_state_without_ids_keeps_the_component_lookup_error() {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_components()
+            .return_once(|_, _, _, _, _| {
+                Box::pin(async {
+                    Err(StorageError::NotFound("ProtocolComponent".to_string(), "ex".to_string()))
+                })
+            });
+        let handler = RpcHandler::new(
+            gw,
+            None,
+            MockEntryPointTracer::new(),
+            PlansConfig::default(),
+            vec![],
+            vec![],
+        );
+
+        let result = handler
+            .get_protocol_state_inner(dto::ProtocolStateRequestBody {
+                protocol_ids: None,
+                protocol_system: "ex".to_string(),
+                chain: dto::Chain::Ethereum,
+                include_balances: true,
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 1),
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .await;
+
+        assert!(matches!(result, Err(RpcError::Storage(StorageError::NotFound(..)))), "{result:?}");
+    }
+
+    /// A state service failure gets the body the database path returns for the same failure.
+    #[tokio::test]
+    async fn test_state_service_version_above_tip_keeps_the_database_path_body() {
+        let err = StateServiceError::VersionAboveTip(BlockOrTimestamp::Block(
+            BlockIdentifier::Number((Chain::Ethereum, 6)),
+        ));
+
+        assert_eq!(
+            RpcError::from(err).to_string(),
+            "Failed to get storage: Could not find Version with id `Block(Number((Ethereum, 6)))`!"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_service_contract_not_found_keeps_the_database_path_body() {
+        let err = StateServiceError::ContractNotFound(Bytes::from(4u64).lpad(20, 0));
+
+        assert_eq!(
+            RpcError::from(err).to_string(),
+            "Failed to get storage: Could not find Contract with id \
+             `0x0000000000000000000000000000000000000004`!"
+        );
+    }
+
+    #[rstest]
+    #[case::serve_in_window(CacheMode::Serve, 6, 0)]
+    #[case::serve_below_window(CacheMode::Serve, 1, 1)]
+    #[case::shadow(CacheMode::Shadow, 6, 1)]
+    #[tokio::test]
+    async fn test_get_contract_state_routes_by_cache_mode_and_version(
+        #[case] mode: CacheMode,
+        #[case] block: u64,
+        #[case] db_calls: usize,
+    ) {
+        let mut gw = MockGateway::new();
+        gw.expect_get_contracts()
+            .times(db_calls)
+            .returning(|_, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let handler = state_routing_handler(gw, mode);
+
+        let result = handler
+            .get_contract_state_routed(dto::StateRequestBody {
+                contract_ids: Some(vec![Bytes::from(1u64).lpad(20, 0)]),
+                protocol_system: "ex".to_string(),
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+                chain: dto::Chain::Ethereum,
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .await;
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// An address the cache cannot build fails in serve mode, and the database is not asked.
+    #[tokio::test]
+    async fn test_get_contract_state_returns_the_service_error_in_serve_mode() {
+        let handler = state_routing_handler(MockGateway::new(), CacheMode::Serve);
+
+        let result = handler
+            .get_contract_state_routed(dto::StateRequestBody {
+                contract_ids: Some(vec![Bytes::from(2u64).lpad(20, 0)]),
+                protocol_system: "ex".to_string(),
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, 6),
+                chain: dto::Chain::Ethereum,
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(RpcError::Storage(StorageError::NotFound(ref kind, _))) if kind == "Contract"),
+            "{result:?}"
+        );
+    }
+
+    #[rstest]
+    #[case::serve_in_window(CacheMode::Serve, 6, 0)]
+    #[case::serve_below_window(CacheMode::Serve, 1, 1)]
+    #[case::shadow(CacheMode::Shadow, 6, 1)]
+    #[tokio::test]
+    async fn test_get_protocol_state_routes_by_cache_mode_and_version(
+        #[case] mode: CacheMode,
+        #[case] block: u64,
+        #[case] db_calls: usize,
+    ) {
+        let mut gw = MockGateway::new();
+        gw.expect_get_protocol_states()
+            .times(db_calls)
+            .returning(|_, _, _, _, _, _| {
+                Box::pin(async { Ok(WithTotal { entity: vec![], total: Some(0) }) })
+            });
+        let handler = state_routing_handler(gw, mode);
+
+        let result = handler
+            .get_protocol_state_routed(dto::ProtocolStateRequestBody {
+                protocol_ids: Some(vec!["c1".to_string()]),
+                protocol_system: "ex".to_string(),
+                chain: dto::Chain::Ethereum,
+                include_balances: true,
+                version: dto::VersionParam::at_block(dto::Chain::Ethereum, block),
+                pagination: dto::PaginationParams::new(0, 100),
+            })
+            .await;
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     /// The requested address list is sliced to the page before the db call, so the db must not

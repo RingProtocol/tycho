@@ -46,7 +46,8 @@ services/
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
-    cache.rs                EntityCache — long-lived timestamped entity store the windows fold into (not wired yet, ENG-6305)
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
+    service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -169,6 +170,19 @@ to `depth` blocks: readers that merge both sides must bound window reads by `db_
 Depth and fold batching come from `--delta-window-depth` (default 128) and
 `--delta-window-fold-batch` (default 1).
 
+With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
+snapshot after the extractors are built and before the server starts (`EntityCache::load` in
+`services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
+window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
+load, and the windows fold into `DiscardSink`.
+
+In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
+first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
+window changes up to the requested version, without reading the database. A request it cannot
+answer comes back as a `FallbackReason`, and the handler answers it from the database path and
+counts it in `db_path_requests{endpoint, reason}`. `shadow` answers every request from the
+database path.
+
 ## Connections
 
 ```
@@ -182,7 +196,10 @@ ExtractorSupervisor (supervisor.rs) — rebuilds the runner via ExtractorFactory
             ├─ WsService (services/ws.rs) → WebSocket clients
             └─ PendingDeltas (services/deltas_buffer.rs)
                  └─ DeltaWindow per extractor (services/state/window.rs)
+                      ├─ folds into EntityCache (services/state/cache.rs) [shadow|serve], else DiscardSink
+                      ├─ StateService (services/state/service.rs) ← EntityCache [serve]
                       └─ RpcHandlers (services/rpc.rs) → HTTP responses
+                           (state endpoints: StateService first, database path on a fallback)
 ```
 
 ## Client Sync

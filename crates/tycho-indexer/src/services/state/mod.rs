@@ -1,27 +1,37 @@
 //! In-memory serving of state requests.
 //!
-//! This module holds the block window ([`window`]) and the entity cache ([`cache`]) it folds
-//! into. Locking is described in the [`cache`] module doc.
+//! This module holds the block window ([`window`]), the entity cache ([`cache`]) it folds into,
+//! and the service that answers state requests from both ([`service`]). Locking is described in
+//! the [`cache`] module doc; the read order in the [`service`] module doc.
 //!
-//! # Planned end state
+//! # How a state request is served
 //!
-//! The rest of this doc describes the target design (ENG-6293, ENG-6304, ENG-6305). The database
-//! fill path and the request routing layer are not built yet; `DiscardSink` is still the
-//! production sink and every request reads the database.
+//! The cache is built at startup by [`cache::EntityCache::load`] when the mode is not `off`, and
+//! the windows fold into it. In `serve`, a response is `cached entry ⊕ window changes up to the
+//! requested version`, where `⊕` applies each change only when it is newer than the value it
+//! writes — the rule folds use. An entity the cache and the window do not hold does not exist.
 //!
-//! State responses are built as `cached base ⊕ window deltas up to the requested version`, where
-//! `⊕` applies deltas on top of a base and the highest block wins for each value. The database is
-//! read only for entities the cache has never seen.
-//!
-//! A read collects the window patch for its keys first, then reads the entries, and applies the
-//! patch changes that are not older than each value's tag — the rule folds use; re-applying an
-//! equal-tag change is harmless because delta values are absolute. If an entry has already moved
-//! past the requested version (folding is batched), that request is served the way uncommitted
-//! versions are served today — latest from the DB plus the buffered window changes — because the
-//! cache keeps no history.
-//!
-//! Versions below the window go to the versioned DB path. Deletions folded into the cache are
-//! always below the window floor by then, so a below-window read never misses them.
+//! The cache keeps no history. A version it cannot rebuild — below the window, or older than a
+//! cached value — is answered by the database path the handlers used before the cache existed.
+//! Deletions folded into the cache are always below the window floor by then, so a below-window
+//! read never misses them.
 
 pub(crate) mod cache;
+pub(crate) mod service;
 pub(crate) mod window;
+
+/// Which path answers `/contract_state` and `/protocol_state`. Set per deployment with
+/// `ENTITY_CACHE_MODE`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum EntityCacheMode {
+    /// No cache is loaded; every request reads the database.
+    #[default]
+    Off,
+    /// The cache is loaded at startup and the windows fold into it. Clients get the database
+    /// answer; a sample of requests also runs the cache path and compares the two results
+    /// (ENG-6295).
+    Shadow,
+    /// The cache is loaded at startup and the windows fold into it. Clients get the cache answer;
+    /// versions the cache cannot rebuild are answered from the database.
+    Serve,
+}
