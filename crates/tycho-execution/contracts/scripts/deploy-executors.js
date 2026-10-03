@@ -104,6 +104,7 @@ const deploy_protocols = {
         "native_wrapper",
         "rfq:metric",
         "rfq:native",
+        "fallback:rfq:metric",
     ],
     "arc": [
         "uniswap_v2",
