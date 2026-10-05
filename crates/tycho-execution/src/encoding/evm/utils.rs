@@ -16,6 +16,7 @@ use alloy::{
     },
     sol_types::SolValue,
 };
+use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
 use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
@@ -292,6 +293,11 @@ pub(crate) fn record_signed_quote_deviation(
     signed_quote: &SignedQuote,
 ) {
     let component = swap.component();
+    let labels = [
+        ("protocol", component.protocol_system.clone()),
+        ("token_in", swap.token_in().address.to_string()),
+        ("token_out", swap.token_out().address.to_string()),
+    ];
     let level_amount_out = match protocol_state.get_amount_out(
         signed_quote.amount_in.clone(),
         swap.token_in(),
@@ -299,6 +305,7 @@ pub(crate) fn record_signed_quote_deviation(
     ) {
         Ok(result) => result.amount,
         Err(err) => {
+            counter!("rfq_signed_quote_unpriced_total", &labels).increment(1);
             warn!(
                 protocol = %component.protocol_system,
                 component_id = %component.id,
@@ -322,6 +329,10 @@ pub(crate) fn record_signed_quote_deviation(
         deviation_bps,
         "signed RFQ quote against its price levels"
     );
+    match deviation_bps {
+        Some(bps) => histogram!("rfq_signed_quote_deviation_bps", &labels).record(bps as f64),
+        None => counter!("rfq_signed_quote_unpriced_total", &labels).increment(1),
+    }
 }
 
 /// Returns `(signed - level) / level` in whole basis points, truncated toward zero.
