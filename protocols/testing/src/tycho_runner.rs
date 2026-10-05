@@ -74,9 +74,10 @@ impl TychoRunner {
             "--start-block",
             &start_block.to_string(),
             "--stop-block",
-            &(end_block + 3).to_string(), /* +3 is to force our the stop block to be indexed and
-                                           * saved into the db. stop block +1 and +2 will not be
-                                           * included in the db */
+            // The substreams stop block is exclusive and the indexer leaves the newest streamed
+            // block uncommitted, so `+3` commits through `end_block + 1`. The test runner reads
+            // the snapshot at the last committed block, not at `end_block`.
+            &(end_block + 3).to_string(),
             "--dci-plugin",
             "rpc",
         ]);

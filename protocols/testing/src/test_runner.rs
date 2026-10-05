@@ -602,7 +602,19 @@ impl TestRunner {
                     .wrap_err("Failed to run Tycho")?;
             }
             let rpc_server = tycho_runner.start_rpc_server()?;
-            match self.run_test(test, &config, test.stop_block) {
+            let result = self
+                .runtime
+                .block_on(self.last_indexed_block())
+                .and_then(|last_indexed| snapshot_block(last_indexed, test.stop_block))
+                .and_then(|block| {
+                    info!(
+                        "Reading the snapshot at block {block}, the last one the indexer committed \
+                         (stop block {})",
+                        test.stop_block
+                    );
+                    self.run_test(test, &config, block)
+                });
+            match result {
                 Ok(_) => {
                     info!("✅ {} passed\n", test.name);
                 }
@@ -772,6 +784,32 @@ impl TestRunner {
             .into_diagnostic()?;
 
         Ok(())
+    }
+
+    /// Returns the highest main-chain block the indexer committed for this chain, or `None` when
+    /// the database holds no block.
+    async fn last_indexed_block(&self) -> miette::Result<Option<u64>> {
+        let (client, connection) = tokio_postgres::connect(&self.db_url, NoTls)
+            .await
+            .into_diagnostic()?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("Database connection error: {:#}", e);
+            }
+        });
+
+        let row = client
+            .query_one(
+                "SELECT max(b.number) FROM block b JOIN chain c ON c.id = b.chain_id \
+                 WHERE c.name = $1 AND b.main",
+                &[&self.chain.to_string()],
+            )
+            .await
+            .into_diagnostic()
+            .wrap_err("Failed to query the last indexed block")?;
+        let number: Option<i64> = row.get(0);
+        Ok(number.map(|number| number as u64))
     }
 
     async fn tycho_runner(&self, initialized_accounts: Vec<String>) -> miette::Result<TychoRunner> {
@@ -1574,6 +1612,25 @@ impl TestRunner {
     }
 }
 
+/// Returns the block a range test reads its snapshot at: the last block the indexer committed.
+///
+/// The indexer keeps only the latest version of every attribute and may commit a block or two
+/// past `stop_block`. A read at an earlier block would miss every attribute written after it,
+/// so the read targets the committed block instead. Fails when that block is missing or below
+/// `stop_block`, because the database then lacks the range under test.
+fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::Result<u64> {
+    let Some(block) = last_indexed_block else {
+        return Err(miette!(
+            "The database holds no indexed block, expected stop block {stop_block}"
+        ));
+    };
+    ensure!(
+        block >= stop_block,
+        "The indexer committed up to block {block}, below the stop block {stop_block}"
+    );
+    Ok(block)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr};
@@ -1583,6 +1640,18 @@ mod tests {
     use tycho_simulation::tycho_common::{models::protocol::ProtocolComponentState, Bytes};
 
     use super::*;
+
+    #[test]
+    fn snapshot_block_reads_at_the_last_committed_block() {
+        assert_eq!(snapshot_block(Some(51_696_284), 51_696_283).unwrap(), 51_696_284);
+        assert_eq!(snapshot_block(Some(51_696_283), 51_696_283).unwrap(), 51_696_283);
+    }
+
+    #[test]
+    fn snapshot_block_rejects_a_database_short_of_the_stop_block() {
+        assert!(snapshot_block(Some(51_696_282), 51_696_283).is_err());
+        assert!(snapshot_block(None, 51_696_283).is_err());
+    }
 
     /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
     /// size the venue reported, untouched.
