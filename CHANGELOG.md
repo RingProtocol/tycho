@@ -1,3 +1,11 @@
+## [0.437.0](https://github.com/propeller-heads/tycho/compare/0.436.1...0.437.0) (2026-10-05)
+
+
+### Features
+
+* **simulation:** serve Metric RFQ on every chain with a chain id ([b298cf9](https://github.com/propeller-heads/tycho/commit/b298cf9910579b76ec829b96d52d87a2d3e05a23))
+* **simulation:** serve Metric RFQ on every chain with a chain id ([#1535](https://github.com/propeller-heads/tycho/issues/1535)) ([28685fe](https://github.com/propeller-heads/tycho/commit/28685fe52aedff6af4829a902d5642fcd488e3e3))
+
 ## [0.436.1](https://github.com/propeller-heads/tycho/compare/0.436.0...0.436.1) (2026-10-05)
 
 
