@@ -1,3 +1,16 @@
+## [0.439.0](https://github.com/propeller-heads/tycho/compare/0.438.0...0.439.0) (2026-10-05)
+
+
+### Features
+
+* add Arbitrum Metric executor address ([f0cedc4](https://github.com/propeller-heads/tycho/commit/f0cedc461247ee5bbf6d586ac9534a2d5c0163b4))
+* add Arbitrum Metric executor address ([#1538](https://github.com/propeller-heads/tycho/issues/1538)) ([bc8760e](https://github.com/propeller-heads/tycho/commit/bc8760e03c83f7182fc0cae6b8196be7eba86eab))
+
+
+### Bug Fixes
+
+* **execution:** list the Arbitrum Metric executor in the deployment registry ([f940c4d](https://github.com/propeller-heads/tycho/commit/f940c4d60927e569f36ee607c779747ff6b167ff))
+
 ## [0.438.0](https://github.com/propeller-heads/tycho/compare/0.437.0...0.438.0) (2026-10-05)
 
 
