@@ -714,6 +714,13 @@ impl TestRunner {
             self.vm_simulation_traces,
         )?;
 
+        let undecoded = undecoded_components(&test.expected_components, update.states.keys());
+        ensure!(
+            undecoded.is_empty(),
+            "Expected components failed to decode, see the StateDecodingFailure warnings: {}",
+            undecoded.join(", ")
+        );
+
         let protocol_components_simulation: HashMap<String, ProtocolComponentModel> =
             update.new_pairs.clone();
 
@@ -1631,6 +1638,25 @@ fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::R
     Ok(block)
 }
 
+/// Returns the lowercase ids of expected components that should be simulated but are missing
+/// from the decoded update. The decoder skips components whose state fails to decode, which
+/// would otherwise leave them untested without failing the test.
+fn undecoded_components<'a>(
+    expected_components: &[ProtocolComponentWithTestConfig],
+    decoded_ids: impl IntoIterator<Item = &'a String>,
+) -> Vec<String> {
+    let decoded: HashSet<String> = decoded_ids
+        .into_iter()
+        .map(|id| id.to_lowercase())
+        .collect();
+    expected_components
+        .iter()
+        .filter(|component| !component.skip_simulation)
+        .map(|component| component.base.id.to_lowercase())
+        .filter(|id| !decoded.contains(id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, env, str::FromStr};
@@ -1651,6 +1677,31 @@ mod tests {
     fn snapshot_block_rejects_a_database_short_of_the_stop_block() {
         assert!(snapshot_block(Some(51_696_282), 51_696_283).is_err());
         assert!(snapshot_block(None, 51_696_283).is_err());
+    }
+
+    #[test]
+    fn undecoded_components_lists_expected_components_missing_from_the_update() {
+        let expected: Vec<ProtocolComponentWithTestConfig> = serde_yaml::from_str(
+            r#"
+            - id: "0xAA"
+              tokens: []
+              creation_tx: "0x01"
+            - id: "0xbb"
+              tokens: []
+              creation_tx: "0x02"
+            - id: "0xcc"
+              tokens: []
+              creation_tx: "0x03"
+              skip_simulation: true
+            "#,
+        )
+        .unwrap();
+        let decoded = ["0xaa".to_string()];
+
+        assert_eq!(undecoded_components(&expected, &decoded), vec!["0xbb".to_string()]);
+        assert!(
+            undecoded_components(&expected, &["0xaa".to_string(), "0xBB".to_string()]).is_empty()
+        );
     }
 
     /// A limit no swap could be executed with is capped; anything at or below the ceiling is the
