@@ -604,7 +604,7 @@ impl TestRunner {
             let rpc_server = tycho_runner.start_rpc_server()?;
             let result = self
                 .runtime
-                .block_on(self.last_indexed_block())
+                .block_on(self.last_indexed_block(&config.protocol_system))
                 .and_then(|last_indexed| snapshot_block(last_indexed, test.stop_block))
                 .and_then(|block| {
                     info!(
@@ -793,9 +793,9 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Returns the highest main-chain block the indexer committed for this chain, or `None` when
-    /// the database holds no block.
-    async fn last_indexed_block(&self) -> miette::Result<Option<u64>> {
+    /// Returns the last main-chain block committed by the protocol's extractor on this chain,
+    /// or `None` when it has no committed extraction state.
+    async fn last_indexed_block(&self, protocol_system: &str) -> miette::Result<Option<u64>> {
         let (client, connection) = tokio_postgres::connect(&self.db_url, NoTls)
             .await
             .into_diagnostic()?;
@@ -807,16 +807,22 @@ impl TestRunner {
         });
 
         let row = client
-            .query_one(
-                "SELECT max(b.number) FROM block b JOIN chain c ON c.id = b.chain_id \
-                 WHERE c.name = $1 AND b.main",
-                &[&self.chain.to_string()],
+            .query_opt(
+                "SELECT b.number FROM extraction_state e \
+                 JOIN chain c ON c.id = e.chain_id \
+                 JOIN block b ON b.id = e.block_id AND b.chain_id = e.chain_id \
+                 WHERE c.name = $1 AND e.name = $2 AND b.main",
+                &[&self.chain.to_string(), &protocol_system],
             )
             .await
             .into_diagnostic()
-            .wrap_err("Failed to query the last indexed block")?;
-        let number: Option<i64> = row.get(0);
-        Ok(number.map(|number| number as u64))
+            .wrap_err_with(|| {
+                format!(
+                    "Failed to query the last indexed block for {protocol_system} on {}",
+                    self.chain
+                )
+            })?;
+        Ok(row.map(|row| row.get::<_, i64>(0) as u64))
     }
 
     async fn tycho_runner(&self, initialized_accounts: Vec<String>) -> miette::Result<TychoRunner> {
