@@ -75,8 +75,10 @@ impl TychoRunner {
             &start_block.to_string(),
             "--stop-block",
             // The substreams stop block is exclusive and the indexer leaves the newest streamed
-            // block uncommitted, so `+3` commits through `end_block + 1`. The test runner reads
-            // the snapshot at the last committed block, not at `end_block`.
+            // block uncommitted, so `+3` commits through `end_block`. It commits `end_block + 1`
+            // only when the stream ends slowly: that last commit runs in a task the process does
+            // not wait for on exit. The test runner reads the snapshot at the last committed
+            // block.
             &(end_block + 3).to_string(),
             "--dci-plugin",
             "rpc",

@@ -795,6 +795,11 @@ impl TestRunner {
 
     /// Returns the last main-chain block committed by the protocol's extractor on this chain,
     /// or `None` when it has no committed extraction state.
+    ///
+    /// Stopgap: `tycho-indexer run` does not wait for its final commit before exiting, so the
+    /// committed block is `stop_block` or `stop_block + 1` depending on how fast the stream
+    /// ends. Once the indexer commits through its stop block on stream end, read at
+    /// `stop_block` and remove this query, which depends on the indexer's private storage schema.
     async fn last_indexed_block(&self, protocol_system: &str) -> miette::Result<Option<u64>> {
         let (client, connection) = tokio_postgres::connect(&self.db_url, NoTls)
             .await
@@ -1628,10 +1633,11 @@ impl TestRunner {
 
 /// Returns the block a range test reads its snapshot at: the last block the indexer committed.
 ///
-/// The indexer keeps only the latest version of every attribute and may commit a block or two
-/// past `stop_block`. A read at an earlier block would miss every attribute written after it,
-/// so the read targets the committed block instead. Fails when that block is missing or below
-/// `stop_block`, because the database then lacks the range under test.
+/// The indexer keeps only the latest version of every attribute and may commit one block past
+/// `stop_block`, depending on how fast the stream ends. A read at an earlier block would miss
+/// every attribute written after it, so the read targets the committed block instead. Fails
+/// when that block is missing or below `stop_block`, because the database then lacks the range
+/// under test.
 fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::Result<u64> {
     let Some(block) = last_indexed_block else {
         return Err(miette!(
@@ -1645,9 +1651,9 @@ fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::R
     Ok(block)
 }
 
-/// Returns the lowercase ids of expected components that should be simulated but are missing
-/// from the decoded update. The decoder skips components whose state fails to decode, which
-/// would otherwise leave them untested without failing the test.
+/// Returns the lowercase ids of the expected components without `skip_simulation` that are
+/// absent from `decoded_ids`, compared case-insensitively. Returns an empty list when every such
+/// component decoded.
 fn undecoded_components<'a>(
     expected_components: &[ProtocolComponentWithTestConfig],
     decoded_ids: impl IntoIterator<Item = &'a String>,
