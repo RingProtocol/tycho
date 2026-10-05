@@ -211,6 +211,8 @@ impl StateService {
         // version apply too, as on the database path. Sorting by timestamp restores block order
         // across windows, which building an uncached account from its first delta needs. The sort
         // is stable: among blocks with the same timestamp, this extractor's comes first.
+        // TODO: serve each extractor's account state from its own window only. Reading the other
+        // windows only keeps the answers the same as on the database path.
         blocks.extend(self.other_window_blocks(&request.protocol_system, version)?);
         blocks.sort_by_key(|block| WriteTimestamp::from(&block.block));
         let window_changes = account_changes(&blocks, &page);
@@ -432,6 +434,8 @@ impl StateService {
     /// `version`. Each window is locked on its own, never two at once, and only the block `Arc`s
     /// are copied. A window whose floor is above `version` contributes nothing: its blocks at or
     /// below `version` are already folded into the cache.
+    ///
+    /// This exists only so that account reads give the same answers as the database path.
     fn other_window_blocks(
         &self,
         protocol_system: &str,
