@@ -1,3 +1,16 @@
+## [0.440.0](https://github.com/propeller-heads/tycho/compare/0.439.1...0.440.0) (2026-10-05)
+
+
+### Features
+
+* **execution:** record RFQ signed quote deviation as a metric ([3613c34](https://github.com/propeller-heads/tycho/commit/3613c34b3146d7c9d0a9f761cd9ac101acde8f02))
+* **execution:** record RFQ signed quote deviation as a metric ([#1545](https://github.com/propeller-heads/tycho/issues/1545)) ([6a23bbf](https://github.com/propeller-heads/tycho/commit/6a23bbfe0ddbc44a59e4a54711e9da61e7f13fdd))
+
+
+### Bug Fixes
+
+* **execution:** label RFQ quote metrics by protocol only ([c1010e1](https://github.com/propeller-heads/tycho/commit/c1010e17ba94bdf56d33c100cf8f4f6441ad5339))
+
 ## [0.439.1](https://github.com/propeller-heads/tycho/compare/0.439.0...0.439.1) (2026-10-05)
 
 
