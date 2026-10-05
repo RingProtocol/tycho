@@ -101,7 +101,8 @@ impl VelodromeSlipstreamsState {
     }
 
     /// Swaps token_in until `spot_price(token_in, token_out)` reaches the middle of the band
-    /// `[target, target * (1 + tolerance)]`. Falls back to the numerical search on errors.
+    /// `[target, target * (1 + tolerance)]`. Falls back to the numerical search on errors, and
+    /// when the native swap stops outside the band.
     fn swap_to_target_price(
         &self,
         params: &QueryPoolSwapParams,
@@ -137,6 +138,11 @@ impl VelodromeSlipstreamsState {
             new_state.liquidity = result.liquidity;
             new_state.tick = result.tick;
             new_state.sqrt_price = result.sqrt_price;
+        }
+        // The native swap can spend its whole input allowance before it reaches the limit.
+        let final_spot = new_state.spot_price(token_in, token_out)?;
+        if final_spot < target_f64 || final_spot > target_f64 * (1.0 + tolerance) {
+            return crate::evm::query_pool_swap::query_pool_swap(self, params);
         }
         Ok(PoolSwap::new(amount_in, amount_out, Box::new(new_state), None))
     }
@@ -720,6 +726,33 @@ mod tests {
 
         let swap = pool.query_pool_swap(&params).unwrap();
 
+        assert!(swap.price_points().is_some(), "the numerical search returns price points");
+    }
+
+    /// With maximum liquidity, the native swap spends its whole input allowance far above a very
+    /// low target.
+    #[test]
+    fn test_query_pool_swap_target_price_out_of_reach_falls_back_to_search() {
+        let sqrt_price = get_sqrt_ratio_at_tick(0).unwrap();
+        let ticks = vec![TickInfo::new(MIN_TICK, 0).unwrap(), TickInfo::new(-MIN_TICK, 0).unwrap()];
+        let pool =
+            VelodromeSlipstreamsState::new(u128::MAX, sqrt_price, 3000, 0, 1, 0, ticks).unwrap();
+        let (token_x, token_y) = token_pair();
+        let target = Price::new(BigUint::from(1u8), BigUint::from(1u8) << 100usize);
+        let target_f64 = 2f64.powi(-100);
+        let tolerance = 1e-4;
+        let params = target_price_params(&token_x, &token_y, target, tolerance);
+
+        let swap = pool.query_pool_swap(&params).unwrap();
+
+        let new_spot = swap
+            .new_state()
+            .spot_price(&token_x, &token_y)
+            .unwrap();
+        assert!(
+            new_spot >= target_f64 && new_spot <= target_f64 * (1.0 + tolerance),
+            "spot {new_spot} is outside the band of target {target_f64}"
+        );
         assert!(swap.price_points().is_some(), "the numerical search returns price points");
     }
 
