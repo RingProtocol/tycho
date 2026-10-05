@@ -293,11 +293,7 @@ pub(crate) fn record_signed_quote_deviation(
     signed_quote: &SignedQuote,
 ) {
     let component = swap.component();
-    let labels = [
-        ("protocol", component.protocol_system.clone()),
-        ("token_in", swap.token_in().address.to_string()),
-        ("token_out", swap.token_out().address.to_string()),
-    ];
+    let labels = [("protocol", component.protocol_system.clone())];
     let level_amount_out = match protocol_state.get_amount_out(
         signed_quote.amount_in.clone(),
         swap.token_in(),
@@ -309,6 +305,8 @@ pub(crate) fn record_signed_quote_deviation(
             warn!(
                 protocol = %component.protocol_system,
                 component_id = %component.id,
+                token_in = %swap.token_in().address,
+                token_out = %swap.token_out().address,
                 amount_in = %signed_quote.amount_in,
                 error = %err,
                 "could not price a signed RFQ quote on its price levels"
