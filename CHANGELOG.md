@@ -1,3 +1,11 @@
+## [0.436.1](https://github.com/propeller-heads/tycho/compare/0.436.0...0.436.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **client:** skip retry cooldowns after a healthy websocket connection ([d87a55c](https://github.com/propeller-heads/tycho/commit/d87a55ca5a67ad8409e1d017ed45d77c88392051))
+* **client:** skip retry cooldowns after a healthy websocket connection ([#1485](https://github.com/propeller-heads/tycho/issues/1485)) ([b3a913f](https://github.com/propeller-heads/tycho/commit/b3a913f59a93521dd4f539c3c0ceb7252bacfe83))
+
 ## [0.436.0](https://github.com/propeller-heads/tycho/compare/0.435.2...0.436.0) (2026-10-02)
 
 
