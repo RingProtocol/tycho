@@ -798,7 +798,8 @@ impl TestRunner {
     async fn last_indexed_block(&self, protocol_system: &str) -> miette::Result<Option<u64>> {
         let (client, connection) = tokio_postgres::connect(&self.db_url, NoTls)
             .await
-            .into_diagnostic()?;
+            .into_diagnostic()
+            .wrap_err("Failed to connect to the test database")?;
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
@@ -917,7 +918,7 @@ impl TestRunner {
     /// * `adapter_build_signature` - Optional build signature for the adapter contract
     /// * `adapter_build_args` - Optional build arguments for the adapter contract
     /// * `vm_simulation_traces` - Whether to enable VM simulation traces
-    /// * `stop_block` - The block number to fetch data for
+    /// * `block` - The block number to fetch data for
     ///
     /// # Returns
     /// A tuple containing:
@@ -929,9 +930,9 @@ impl TestRunner {
         &self,
         protocol_system: &str,
         expected_component_ids: Vec<String>,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<(Vec<ProtocolComponent>, Snapshot, HashMap<Bytes, Token>)> {
-        info!("Fetching protocol data from Tycho with stop block {}...", stop_block);
+        info!("Fetching protocol data from Tycho at block {block}...");
 
         // Create Tycho client for the RPC server
         let tycho_client = TychoClient::new(&self.tycho_http_url(), None)
@@ -994,7 +995,7 @@ impl TestRunner {
             .runtime
             .block_on(tycho_client.get_snapshots(
                 chain,
-                stop_block,
+                block,
                 protocol_system,
                 &components_by_id,
                 &contract_ids,
@@ -1634,7 +1635,7 @@ impl TestRunner {
 fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::Result<u64> {
     let Some(block) = last_indexed_block else {
         return Err(miette!(
-            "The database holds no indexed block, expected stop block {stop_block}"
+            "The extractor has no committed block, expected at least stop block {stop_block}"
         ));
     };
     ensure!(
