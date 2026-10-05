@@ -13,11 +13,12 @@ use tycho_ethereum::{
         balance_slot_detector::EVMBalanceSlotDetector,
     },
 };
-use tycho_simulation::tycho_common::models::Chain;
+use tycho_simulation::tycho_common::models::{Chain, NativeAsset};
 
 #[derive(Clone)]
 pub struct RPCTools {
     pub rpc_url: String,
+    pub native_asset: NativeAsset,
     pub provider: RootProvider<Ethereum>,
     pub evm_balance_slot_detector: Arc<EVMBalanceSlotDetector>,
     pub evm_allowance_slot_detector: Arc<EVMAllowanceSlotDetector>,
@@ -41,6 +42,7 @@ impl RPCTools {
 
         Ok(Self {
             rpc_url: rpc_url.to_string(),
+            native_asset: chain.native_asset(),
             provider,
             evm_balance_slot_detector,
             evm_allowance_slot_detector,
