@@ -6,7 +6,7 @@ This file explains which license governs which parts of this repository. The lic
 
 Unless a file or directory listed below says otherwise, the material in this repository is licensed under the [Fynd License 1.1](LICENSE.md). This applies to:
 
-- Tycho releases `0.500.0` and later, including every crate, binary, container image, and Python package built from them.
+- Tycho releases `0.435.0` and later, including every crate, binary, container image, and Python package built from them.
 - `tycho-substreams` releases after `0.8.1` and `substreams-helper` releases after `0.0.2`.
 - `tycho-indexer-client` (Python) releases after `0.158.0`.
 - Any other copy of this repository, or of material from it, that is distributed with the Fynd License 1.1.
@@ -17,9 +17,9 @@ For a custom license, contact legal@propellerheads.xyz.
 
 ## Earlier releases
 
-Tycho releases before `0.500.0` were released under the MIT License, and they remain under that license. Router and executor contract source published before this change was released under the Business Source License 1.1 in [propeller-heads/tycho-execution](https://github.com/propeller-heads/tycho-execution), and it remains under that license.
+Tycho releases before `0.435.0` were released under the MIT License, and they remain under that license. Router and executor contract source published before this change was released under the Business Source License 1.1 in [propeller-heads/tycho-execution](https://github.com/propeller-heads/tycho-execution), and it remains under that license.
 
-Parts of this repository were contributed under the MIT License before `0.500.0`. As the MIT License requires, its notice is reproduced here and applies to those portions:
+Parts of this repository were contributed under the MIT License before `0.435.0`. As the MIT License requires, its notice is reproduced here and applies to those portions:
 
 ```
 MIT License

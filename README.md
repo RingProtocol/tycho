@@ -79,6 +79,6 @@ Tycho consists of several crates, each responsible for different aspects of the 
 
 ## License
 
-Tycho 0.500.0 and later are licensed under the [Fynd License 1.1](LICENSE.md). Tycho releases before 0.500.0 were released under the MIT License. See [LICENSING.md](LICENSING.md) for exceptions and third-party code.
+Tycho 0.435.0 and later are licensed under the [Fynd License 1.1](LICENSE.md). Tycho releases before 0.435.0 were released under the MIT License. See [LICENSING.md](LICENSING.md) for exceptions and third-party code.
 
 [tg-url]: https://t.me/+B4CNQwv7dgIyYTJl

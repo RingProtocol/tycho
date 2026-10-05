@@ -1,3 +1,43 @@
+## [0.437.0](https://github.com/propeller-heads/tycho/compare/0.436.1...0.437.0) (2026-10-05)
+
+
+### Features
+
+* **simulation:** serve Metric RFQ on every chain with a chain id ([b298cf9](https://github.com/propeller-heads/tycho/commit/b298cf9910579b76ec829b96d52d87a2d3e05a23))
+* **simulation:** serve Metric RFQ on every chain with a chain id ([#1535](https://github.com/propeller-heads/tycho/issues/1535)) ([28685fe](https://github.com/propeller-heads/tycho/commit/28685fe52aedff6af4829a902d5642fcd488e3e3))
+
+## [0.436.1](https://github.com/propeller-heads/tycho/compare/0.436.0...0.436.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **client:** skip retry cooldowns after a healthy websocket connection ([d87a55c](https://github.com/propeller-heads/tycho/commit/d87a55ca5a67ad8409e1d017ed45d77c88392051))
+* **client:** skip retry cooldowns after a healthy websocket connection ([#1485](https://github.com/propeller-heads/tycho/issues/1485)) ([b3a913f](https://github.com/propeller-heads/tycho/commit/b3a913f59a93521dd4f539c3c0ceb7252bacfe83))
+
+## [0.436.0](https://github.com/propeller-heads/tycho/compare/0.435.2...0.436.0) (2026-10-02)
+
+
+### Features
+
+* **execution:** log RFQ signed quotes against their price levels ([#1534](https://github.com/propeller-heads/tycho/issues/1534)) ([981523e](https://github.com/propeller-heads/tycho/commit/981523e73b45229203e25af1ef5fa76d4657ff7b))
+* **execution:** record RFQ signed quotes against their price levels ([18af244](https://github.com/propeller-heads/tycho/commit/18af244b36057d23ab18648c8d9029c68e89f29e))
+
+## [0.435.2](https://github.com/propeller-heads/tycho/compare/0.435.1...0.435.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **test:** fund Arc USDC sells through the native balance ([06873d6](https://github.com/propeller-heads/tycho/commit/06873d63ee47d41599b855fed2e6a5ad7ef0f8ba))
+* **test:** fund Arc USDC sells through the native balance ([#1527](https://github.com/propeller-heads/tycho/issues/1527)) ([696230e](https://github.com/propeller-heads/tycho/commit/696230e55f2e226ac6ac390b085593af266412ec))
+
+## [0.435.1](https://github.com/propeller-heads/tycho/compare/0.435.0...0.435.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **simulation:** point the Bebop pAMM at its live router ([36013e2](https://github.com/propeller-heads/tycho/commit/36013e258cb2e1708857f0cde0f851d11baa6a43))
+* **simulation:** point the Bebop pAMM at its live router ([#1531](https://github.com/propeller-heads/tycho/issues/1531)) ([44d3644](https://github.com/propeller-heads/tycho/commit/44d36442323c3d2b39583e477d82b7ef3d3c248f))
+
 ## [0.435.0](https://github.com/propeller-heads/tycho/compare/0.434.0...0.435.0) (2026-10-02)
 
 
