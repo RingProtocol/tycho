@@ -1,3 +1,45 @@
+## [0.438.0](https://github.com/propeller-heads/tycho/compare/0.437.0...0.438.0) (2026-10-05)
+
+
+### Features
+
+* **curve:** native swap-to-price for Curve StableSwap ([7acd54a](https://github.com/propeller-heads/tycho/commit/7acd54a78dcabd705a67aa34891ff3f16039914d))
+* **ekubo:** native swap-to-price for Ekubo v1 and v3 ([a5a9d47](https://github.com/propeller-heads/tycho/commit/a5a9d47acda743477ae6d1ffa846085908db2e37))
+* **fluid:** closed-form swap-to-price for Fluid V1 ([7f187f1](https://github.com/propeller-heads/tycho/commit/7f187f1b64c2620954ef3ea441533bb36cca4c81))
+* Native swap to price for Fluid, Ekubo and Curve ([#1216](https://github.com/propeller-heads/tycho/issues/1216)) ([d1fb1d9](https://github.com/propeller-heads/tycho/commit/d1fb1d9e6abbe35a6d1da7abeab9db95153955fe))
+* **slipstreams:** native swap-to-price for Aerodrome and Velodrome ([9486bb8](https://github.com/propeller-heads/tycho/commit/9486bb802a1b696af15ad71cc552d317221f0511))
+* **tycho-simulation:** validate TickList invariants on deserialize ([920522a](https://github.com/propeller-heads/tycho/commit/920522a0faf3ecda1a636fc668c5497cffb05964))
+* **uniswap-v4:** support serde for hookless UniswapV4State ([10798e3](https://github.com/propeller-heads/tycho/commit/10798e3b4125bcb743245546277327ebcc1699a8))
+
+
+### Bug Fixes
+
+* account for Curve admin fees and target tolerance ([aa17589](https://github.com/propeller-heads/tycho/commit/aa17589c7d08181047ceb30a87601ba2304d42de))
+* **curve:** log why the native target-price solver falls back ([c85509c](https://github.com/propeller-heads/tycho/commit/c85509c9e75656914984cbfba0d47508708156c6))
+* **curve:** search past the input balance for the target price ([904f31d](https://github.com/propeller-heads/tycho/commit/904f31d641b925e9caf83e996d7dbf1e20d2dfdb))
+* **ekubo:** reject a target-price quote that stops before the limit ([3a6e7a5](https://github.com/propeller-heads/tycho/commit/3a6e7a596ccffabcb4fbf5d49e45c84a590f7826))
+* round Ekubo limits and advance virtual orders first ([7330cb9](https://github.com/propeller-heads/tycho/commit/7330cb92fdbaf03b30bd3914ebe2bea149df1a80))
+* validate Aerodrome target after observation updates ([c291465](https://github.com/propeller-heads/tycho/commit/c2914653b3f9702c7349cc5ffdd4f322e14073e5))
+* validate deserialized ticks and rebuild derived prices ([34f643d](https://github.com/propeller-heads/tycho/commit/34f643da27df38f1982f4ae31b40dd51838f8bd3))
+* **velodrome:** check the final price before a native target swap ([49b4a8a](https://github.com/propeller-heads/tycho/commit/49b4a8aada923511428cc509e9ce954890d28936))
+* **velodrome:** read the 420 custom fee as a zero fee ([af09c7d](https://github.com/propeller-heads/tycho/commit/af09c7d5ded0e53b9e39139826810074f9e3baaf))
+
+## [0.437.0](https://github.com/propeller-heads/tycho/compare/0.436.1...0.437.0) (2026-10-05)
+
+
+### Features
+
+* **simulation:** serve Metric RFQ on every chain with a chain id ([b298cf9](https://github.com/propeller-heads/tycho/commit/b298cf9910579b76ec829b96d52d87a2d3e05a23))
+* **simulation:** serve Metric RFQ on every chain with a chain id ([#1535](https://github.com/propeller-heads/tycho/issues/1535)) ([28685fe](https://github.com/propeller-heads/tycho/commit/28685fe52aedff6af4829a902d5642fcd488e3e3))
+
+## [0.436.1](https://github.com/propeller-heads/tycho/compare/0.436.0...0.436.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **client:** skip retry cooldowns after a healthy websocket connection ([d87a55c](https://github.com/propeller-heads/tycho/commit/d87a55ca5a67ad8409e1d017ed45d77c88392051))
+* **client:** skip retry cooldowns after a healthy websocket connection ([#1485](https://github.com/propeller-heads/tycho/issues/1485)) ([b3a913f](https://github.com/propeller-heads/tycho/commit/b3a913f59a93521dd4f539c3c0ceb7252bacfe83))
+
 ## [0.436.0](https://github.com/propeller-heads/tycho/compare/0.435.2...0.436.0) (2026-10-02)
 
 
