@@ -909,28 +909,23 @@ impl TestRunner {
         Ok(())
     }
 
-    /// Fetches protocol data from the Tycho RPC server and prepares it for validation and
-    /// simulation.
+    /// Fetches protocol data from the Tycho RPC server for validation and decoding.
     ///
-    /// This method connects to the running Tycho RPC server to retrieve protocol components,
-    /// states, and contract storage. It then sets up the Tycho Decoder and creates an update
-    /// message that can be used for validation and simulation testing.
+    /// Retrieves the protocol's components, then the snapshot of the expected components at
+    /// `block`, including the contracts and storage slots their traced entry points access.
     ///
     /// # Arguments
     /// * `protocol_system` - The protocol system identifier (e.g., "uniswap_v2", "balancer_v2")
-    /// * `expected_component_ids` - List of component IDs to fetch from Tycho
-    /// * `adapter_contract` - Optional adapter contract name for VM-based protocols
-    /// * `adapter_build_signature` - Optional build signature for the adapter contract
-    /// * `adapter_build_args` - Optional build arguments for the adapter contract
-    /// * `vm_simulation_traces` - Whether to enable VM simulation traces
-    /// * `block` - The block number to fetch data for
+    /// * `expected_component_ids` - Lowercase ids of the components to snapshot; empty means all of
+    ///   the protocol's components
+    /// * `block` - The block number to fetch the snapshot at
     ///
     /// # Returns
     /// A tuple containing:
-    /// - `Update` - Decoded protocol state update for simulation
-    /// - `HashMap<String, ProtocolComponentState>` - Protocol states by component ID
-    /// - `Block` - The block header for the specified block
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    /// - `Vec<ProtocolComponent>` - Every component of the protocol system
+    /// - `Snapshot` - States and contract storage of the expected components at `block`
+    /// - `HashMap<Bytes, Token>` - All tokens on the chain, by address
+    #[allow(clippy::type_complexity)]
     fn fetch_from_tycho_rpc(
         &self,
         protocol_system: &str,
