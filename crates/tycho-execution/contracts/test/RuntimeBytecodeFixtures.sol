@@ -10,8 +10,10 @@ import {LibString} from "@solady/utils/LibString.sol";
 /// against a fresh build; `script/WriteRuntimeBytecodeFixtures.s.sol` rewrites them.
 ///
 /// Each fixture deploys on a fork of its own, which is why two fixtures may build the same
-/// contract. A fork only has to carry the state the constructor reads: the addresses it checks
-/// for code, and any value it stores in an immutable.
+/// contract. An executor forks the chain it is deployed on, at a block pinned per chain, so a
+/// constructor that reads chain state bakes that chain's value in. A fork only has to carry the
+/// state the constructor reads: the addresses it checks for code, and any value it stores in an
+/// immutable.
 abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
     using LibString for string;
 
@@ -21,10 +23,8 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
     string constant WRITE_COMMAND =
         "forge script script/WriteRuntimeBytecodeFixtures.s.sol";
 
-    /// Fork a fixture deploys on unless it names its own. Past block 22090400, where the EtherFi
-    /// redemption manager went live, so constructors that check it for code can run.
-    string constant DEFAULT_CHAIN = "mainnet";
-    uint256 constant DEFAULT_BLOCK = 23_000_000;
+    /// Chain the non-executor fixtures (router, fee calculator) deploy on.
+    string constant ETHEREUM = "ethereum";
 
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     /// Stands in for every role admin and fee receiver: those land in storage, not in bytecode.
@@ -34,7 +34,8 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         string name;
         string contractName;
         bytes constructorArgs;
-        /// An alias from `[rpc_endpoints]` in foundry.toml.
+        /// A chain from executor_deployments.json, which is also an alias from `[rpc_endpoints]`
+        /// in foundry.toml.
         string chain;
         uint256 blockNumber;
     }
@@ -111,28 +112,47 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         deployCodeTo(contractName, constructorArgs, deployed);
     }
 
-    /// Lists a fixture built from `contractName` with literal constructor arguments.
+    /// Block a chain's fixtures fork at. Pinned so a fixture is reproducible, and past the state
+    /// the constructors read.
+    function _forkBlock(string memory chain) internal pure returns (uint256) {
+        // Past block 22090400, where the EtherFi redemption manager went live, so constructors
+        // that check it for code can run.
+        if (chain.eq(ETHEREUM)) return 23_000_000;
+        // No Base or Robinhood constructor reads chain state yet; these only pin the fork.
+        if (chain.eq("base")) return 46_500_000;
+        if (chain.eq("robinhood")) return 40_000_000;
+        revert(
+            string.concat(chain, " has no fork block; add one to _forkBlock")
+        );
+    }
+
+    /// Lists a fixture built from `contractName` with literal constructor arguments, on Ethereum.
     function _contract(string memory name, bytes memory constructorArgs)
         internal
     {
         _fixtures.push(
-            Fixture(name, name, constructorArgs, DEFAULT_CHAIN, DEFAULT_BLOCK)
+            Fixture(name, name, constructorArgs, ETHEREUM, _forkBlock(ETHEREUM))
         );
     }
 
     /// Lists an executor fixture, built the way `executor_deployments.json` deploys `protocol` on
-    /// `deploymentChain`, against the default fork.
+    /// `deploymentChain`, on a fork of that chain at its pinned block.
     function _executor(
         string memory name,
         string memory deploymentChain,
         string memory protocol
     ) internal {
-        _executor(name, deploymentChain, protocol, DEFAULT_CHAIN, DEFAULT_BLOCK);
+        _executor(
+            name,
+            deploymentChain,
+            protocol,
+            deploymentChain,
+            _forkBlock(deploymentChain)
+        );
     }
 
-    /// Lists an executor fixture against a fork of its own, for a constructor that reads state the
-    /// default fork does not carry: an address it checks for code, or a value it keeps in an
-    /// immutable.
+    /// Lists an executor fixture against a fork it names itself, for a constructor that reads
+    /// state the deployment chain's pinned block does not carry.
     function _executor(
         string memory name,
         string memory deploymentChain,

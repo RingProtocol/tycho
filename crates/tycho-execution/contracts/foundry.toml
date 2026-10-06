@@ -31,6 +31,9 @@ via_ir = true
 
 [rpc_endpoints]
 mainnet = "${RPC_URL}"
+# Chain names from config/executor_deployments.json double as aliases, so the fixtures can fork
+# the chain an executor is deployed on by that name.
+ethereum = "${RPC_URL}"
 base = "${BASE_RPC_URL}"
 robinhood = "${ROBINHOOD_RPC_URL}"
 arbitrum = "${ARBITRUM_RPC_URL}"

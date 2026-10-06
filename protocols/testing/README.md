@@ -84,13 +84,13 @@ time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated
 
 `crates/tycho-execution/contracts/test/RuntimeBytecodeFixtures.sol` lists every fixture and
 deploys it at an address derived from the contract name, with executor constructor arguments read
-from `crates/tycho-execution/config/executor_deployments.json`. A fixture runs
-against the default fork unless its constructor reads state that fork does not carry — an address
-it checks for code, or a value it keeps in an immutable — in which case it names a fork of its own.
+from `crates/tycho-execution/config/executor_deployments.json`. An executor fixture forks the
+chain it is deployed on, at a block pinned per chain, unless its constructor reads state that
+block does not carry — in which case it names a fork of its own.
 
 ```bash
 cd ../../crates/tycho-execution/contracts
-export RPC_URL=..   # plus <CHAIN>_RPC_URL for any fixture that forks another chain
+export RPC_URL=.. BASE_RPC_URL=.. ROBINHOOD_RPC_URL=..   # one per chain with a listed executor
 
 # Verify the committed fixtures match the current contracts (forge test runs this in CI)
 forge test --match-contract RuntimeBytecodeFixtures
