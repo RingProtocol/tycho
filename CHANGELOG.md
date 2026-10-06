@@ -1,3 +1,16 @@
+## [0.440.1](https://github.com/propeller-heads/tycho/compare/0.440.0...0.440.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **substreams:** emit native balance changes recorded on callee frames ([76bfe17](https://github.com/propeller-heads/tycho/commit/76bfe17be0870395a2bfdc3c923a70b4f4f9b45e))
+* **substreams:** emit native balance changes recorded on callee frames ([#1544](https://github.com/propeller-heads/tycho/issues/1544)) ([6587527](https://github.com/propeller-heads/tycho/commit/65875277a04116dfbdd2ae0fecabeadfc904f220))
+
+
+### Performance Improvements
+
+* **common:** serialize hex values without per-value allocations ([c0588a4](https://github.com/propeller-heads/tycho/commit/c0588a4c90fb713993e19aff9ad27d6293efbc13))
+
 ## [0.440.0](https://github.com/propeller-heads/tycho/compare/0.439.1...0.440.0) (2026-10-05)
 
 
