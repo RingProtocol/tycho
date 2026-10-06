@@ -194,6 +194,10 @@
     "rfq:native": {
       "contract": "NativeExecutor",
       "args": ["0x0183D055c77310aF03dCB397eFAA7E9cfB6dB59b"]
+    },
+    "rfq:metric": {
+      "contract": "MetricExecutor",
+      "args": []
     }
   },
   "polygon": {

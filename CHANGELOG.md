@@ -1,3 +1,48 @@
+## [0.440.0](https://github.com/propeller-heads/tycho/compare/0.439.1...0.440.0) (2026-10-05)
+
+
+### Features
+
+* **execution:** record RFQ signed quote deviation as a metric ([3613c34](https://github.com/propeller-heads/tycho/commit/3613c34b3146d7c9d0a9f761cd9ac101acde8f02))
+* **execution:** record RFQ signed quote deviation as a metric ([#1545](https://github.com/propeller-heads/tycho/issues/1545)) ([6a23bbf](https://github.com/propeller-heads/tycho/commit/6a23bbfe0ddbc44a59e4a54711e9da61e7f13fdd))
+
+
+### Bug Fixes
+
+* **execution:** label RFQ quote metrics by protocol only ([c1010e1](https://github.com/propeller-heads/tycho/commit/c1010e17ba94bdf56d33c100cf8f4f6441ad5339))
+
+## [0.439.1](https://github.com/propeller-heads/tycho/compare/0.439.0...0.439.1) (2026-10-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **indexer:** load the entity cache snapshot without transaction joins (#1533)
+* **indexer:** WriteTimestamp::new takes only the block timestamp, and
+WriteTimestamp::block_number is replaced by WriteTimestamp::block_ts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+### Bug Fixes
+
+* **indexer:** apply every window's changes when serving contract state ([d1c2585](https://github.com/propeller-heads/tycho/commit/d1c2585e9ac5b9c88842f14b4567b5af6b24b7ba))
+* **indexer:** apply every window's changes when serving contract state ([#1539](https://github.com/propeller-heads/tycho/issues/1539)) ([23f52ec](https://github.com/propeller-heads/tycho/commit/23f52ec10608c6ae3122d0f2edd99a9daa743014))
+* **indexer:** load the entity cache snapshot without transaction joins ([#1533](https://github.com/propeller-heads/tycho/issues/1533)) ([df4383e](https://github.com/propeller-heads/tycho/commit/df4383ee57c01e36f095e30a950780f24f91d6df))
+* **indexer:** order entity cache writes by block timestamp only ([2a31de6](https://github.com/propeller-heads/tycho/commit/2a31de6f48d7f7bdc0174c4d22117a0b53d3645e))
+* **storage:** bound the entity cache snapshot reads ([d7d6279](https://github.com/propeller-heads/tycho/commit/d7d6279dd3ea400c0f3c082818c847fe3e86adcb))
+
+## [0.439.0](https://github.com/propeller-heads/tycho/compare/0.438.0...0.439.0) (2026-10-05)
+
+
+### Features
+
+* add Arbitrum Metric executor address ([f0cedc4](https://github.com/propeller-heads/tycho/commit/f0cedc461247ee5bbf6d586ac9534a2d5c0163b4))
+* add Arbitrum Metric executor address ([#1538](https://github.com/propeller-heads/tycho/issues/1538)) ([bc8760e](https://github.com/propeller-heads/tycho/commit/bc8760e03c83f7182fc0cae6b8196be7eba86eab))
+
+
+### Bug Fixes
+
+* **execution:** list the Arbitrum Metric executor in the deployment registry ([f940c4d](https://github.com/propeller-heads/tycho/commit/f940c4d60927e569f36ee607c779747ff6b167ff))
+
 ## [0.438.0](https://github.com/propeller-heads/tycho/compare/0.437.0...0.438.0) (2026-10-05)
 
 
