@@ -640,7 +640,7 @@ impl TestRunner {
         &self,
         test: &IntegrationTest,
         config: &IntegrationTestsConfig,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<()> {
         // Fetch protocol data from Tycho RPC
         let expected_ids = test
@@ -650,16 +650,16 @@ impl TestRunner {
             .collect::<Vec<String>>();
 
         // Get block header to extract the timestamp
-        let block = self
+        let header = self
             .runtime
             .block_on(
                 self.rpc_provider
-                    .get_block_header(stop_block),
+                    .get_block_header(block),
             )
             .wrap_err("Failed to get block header")?;
 
         let (protocol_components, snapshot, all_tokens) =
-            self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, stop_block)?;
+            self.fetch_from_tycho_rpc(&config.protocol_system, expected_ids, block)?;
 
         let response_protocol_states_by_id: HashMap<String, ProtocolComponentState> = snapshot
             .states
@@ -692,7 +692,7 @@ impl TestRunner {
                 self.validate_token_balances(
                     &tokens_by_component,
                     &response_protocol_states_by_id,
-                    stop_block,
+                    block,
                 )?;
                 info!("All token balances match the values found onchain")
             }
@@ -707,7 +707,7 @@ impl TestRunner {
 
         let update = self.decode_snapshot(
             &config.protocol_system,
-            &block,
+            &header,
             snapshot,
             all_tokens,
             adapter_contract_path_str,
@@ -736,7 +736,7 @@ impl TestRunner {
         self.runtime
             .block_on(self.run_execution(
                 execution_data,
-                &block,
+                &header,
                 &config.protocol_system,
                 &test.expected_components,
             ))?;
@@ -1552,7 +1552,7 @@ impl TestRunner {
         &self,
         component_tokens: &HashMap<String, Vec<Token>>,
         protocol_states_by_id: &HashMap<String, ProtocolComponentState>,
-        stop_block: u64,
+        block: u64,
     ) -> miette::Result<()> {
         for (id, component) in protocol_states_by_id.iter() {
             let tokens = component_tokens.get(id);
@@ -1577,7 +1577,7 @@ impl TestRunner {
                             .block_on(self.rpc_provider.get_token_balance(
                                 token_address,
                                 component_address,
-                                stop_block,
+                                block,
                             ))?;
                     if balance != node_balance {
                         return Err(miette!(
