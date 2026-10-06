@@ -1,3 +1,22 @@
+## [0.442.0](https://github.com/propeller-heads/tycho/compare/0.441.1...0.442.0) (2026-10-06)
+
+
+### Features
+
+* **indexer:** classify shadow failures by their domain error ([dc39f91](https://github.com/propeller-heads/tycho/commit/dc39f91ace7e3be0952e36c5816e89574901a462))
+* **indexer:** compare contract state answers in shadow mode ([303447e](https://github.com/propeller-heads/tycho/commit/303447efc28ebaefdfa236b4f9525b296f2e6452))
+* **indexer:** compare protocol state answers in shadow mode ([8f9d081](https://github.com/propeller-heads/tycho/commit/8f9d08130fc9b4ebb8685a71810a2f4f6a1bc5fd))
+* **indexer:** count other extractors' unsaved account changes as a known mismatch ([4577d36](https://github.com/propeller-heads/tycho/commit/4577d368df8399ffe20d4c8db1f9cb9524f874de))
+* **indexer:** log known shadow mismatches at debug ([17c7b7a](https://github.com/propeller-heads/tycho/commit/17c7b7a4f607b4b54d6dc068149cddfc2429c8ed))
+* **indexer:** outline shadow mode from the flag to the comparison ([662366d](https://github.com/propeller-heads/tycho/commit/662366de8990a1616b159b02b6ec87350bee12b5))
+* **indexer:** record shadow comparisons in metrics and logs ([2a78be4](https://github.com/propeller-heads/tycho/commit/2a78be4d282ec82e7790ab1d0ac08cf6d7e04648))
+* **indexer:** run the shadow procedure and discard straddled reads ([1e300b5](https://github.com/propeller-heads/tycho/commit/1e300b51f214050cf8f01abf22aaaf892cd8a5b9))
+
+
+### Bug Fixes
+
+* **indexer:** name the first missing address on the database path ([ecaf8a1](https://github.com/propeller-heads/tycho/commit/ecaf8a11d7610547167fc83f87aa5bb1f190df72))
+
 ## [0.441.1](https://github.com/propeller-heads/tycho/compare/0.441.0...0.441.1) (2026-10-06)
 
 
