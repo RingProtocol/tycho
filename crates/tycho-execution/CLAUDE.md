@@ -458,10 +458,10 @@ Line length 80.
 Tests fork Ethereum mainnet via `RPC_URL` and Base via `BASE_RPC_URL` env vars.
 
 Contract changes can alter the runtime bytecode fixtures `protocol-testing` plants
-(`protocols/testing/fixtures/*.runtime.json`). `test/RuntimeBytecodeFixtures.t.sol` checks them as
-part of `forge test`; regenerate and commit them with
-`FIXTURES_WRITE=1 forge test --match-contract RuntimeBytecodeFixtures`. Foundry pins the compiler
-and omits the metadata hash to keep these fixtures reproducible.
+(`protocols/testing/fixtures/*.runtime.json`). `test/RuntimeBytecodeFixtures.sol` lists them,
+`test/RuntimeBytecodeFixtures.t.sol` checks them as part of `forge test`, and
+`forge script script/WriteRuntimeBytecodeFixtures.s.sol` regenerates them for you to commit. Foundry
+pins the compiler and omits the metadata hash to keep these fixtures reproducible.
 
 ### Rust
 
@@ -501,9 +501,9 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
    and `Executor::VARIANTS`, then implement `get_transfer_data`, `swap`, and `funds_expected_address` (plus
    `get_callback_transfer_data` and `handle_callback` for callback protocols), mirroring the Solidity executor.
    Only these caller-controlled executors are modeled — they carry the highest risk and are easiest to model.
-9. List the executor in `contracts/test/RuntimeBytecodeFixtures.t.sol`, regenerate the
-   protocol-testing fixtures with `FIXTURES_WRITE=1 forge test --match-contract RuntimeBytecodeFixtures`
-   and commit `protocols/testing/fixtures/<Name>.runtime.json`.
+9. List the executor in `contracts/test/RuntimeBytecodeFixtures.sol`, regenerate the
+   protocol-testing fixtures with `forge script script/WriteRuntimeBytecodeFixtures.s.sol` (from
+   `contracts/`) and commit `protocols/testing/fixtures/<Name>.runtime.json`.
 
 ## Security
 

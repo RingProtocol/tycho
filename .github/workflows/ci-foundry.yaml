@@ -10,7 +10,7 @@ on:
     branches: [ main ]
     paths:
       - 'crates/tycho-execution/contracts/**'
-      - 'crates/tycho-execution/config/**'
+      - 'crates/tycho-execution/config/executor_deployments.json'
       - 'protocols/adapter-integration/evm/**'
       - 'crates/tycho-simulation/token-proxy-contracts/**'
       - 'protocols/testing/fixtures/**'
@@ -39,14 +39,14 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # `crates/tycho-execution/config` and `protocols/testing/fixtures` feed
+      # `executor_deployments.json` and `protocols/testing/fixtures` feed
       # `RuntimeBytecodeFixtures.t.sol`, which forge test runs with the rest.
       - uses: tj-actions/changed-files@48d8f15b2aaa3d255ca5af3eba4870f807ce6b3c  # v45
         id: filter
         with:
           files: |
             crates/tycho-execution/contracts/**
-            crates/tycho-execution/config/**
+            crates/tycho-execution/config/executor_deployments.json
             protocols/adapter-integration/evm/**
             crates/tycho-simulation/token-proxy-contracts/**
             protocols/testing/fixtures/**

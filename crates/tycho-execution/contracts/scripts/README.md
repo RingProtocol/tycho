@@ -82,18 +82,3 @@ Via the safe wallet UI:
        approved in their UI to execute on chain. Be sure to change the PRIVATE_KEY to that which has permissions on the
        safe wallet.
     2. If it's not set, it will submit the transaction directly to the chain.
-
-## Runtime Bytecode Fixtures
-
-`test/RuntimeBytecodeFixtures.t.sol` writes and checks the runtime bytecode fixtures under
-`protocols/testing/fixtures/`, which protocol-testing plants at simulation time. Each fixture deploys through
-`TestUtils._deployDeterministic` (CREATE3, keyed by contract name), and executor fixtures take their contract and
-constructor arguments from `config/executor_deployments.json`.
-
-```bash
-forge test --match-contract RuntimeBytecodeFixtures                    # verify the committed fixtures are current
-FIXTURES_WRITE=1 forge test --match-contract RuntimeBytecodeFixtures   # regenerate the fixtures
-```
-
-Requires `RPC_URL`, plus `<CHAIN>_RPC_URL` for any fixture that forks another chain. The check runs with the rest of
-`forge test` in Foundry CI.
