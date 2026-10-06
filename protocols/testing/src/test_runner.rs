@@ -1632,7 +1632,8 @@ impl TestRunner {
 /// `stop_block`, depending on how fast the stream ends. A read at an earlier block would miss
 /// every attribute written after it, so the read targets the committed block instead. Fails
 /// when that block is missing or below `stop_block`, because the database then lacks the range
-/// under test.
+/// under test, and when it is past `stop_block + 1`, because the database then holds a later
+/// range, such as one reused with `--reuse-last-sync` from a longer run.
 fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::Result<u64> {
     let Some(block) = last_indexed_block else {
         return Err(miette!(
@@ -1642,6 +1643,11 @@ fn snapshot_block(last_indexed_block: Option<u64>, stop_block: u64) -> miette::R
     ensure!(
         block >= stop_block,
         "The indexer committed up to block {block}, below the stop block {stop_block}"
+    );
+    ensure!(
+        block <= stop_block + 1,
+        "The indexer committed up to block {block}, past the stop block {stop_block}; the \
+         database holds a later range, rerun without --reuse-last-sync"
     );
     Ok(block)
 }
@@ -1685,6 +1691,11 @@ mod tests {
     fn snapshot_block_rejects_a_database_short_of_the_stop_block() {
         assert!(snapshot_block(Some(51_696_282), 51_696_283).is_err());
         assert!(snapshot_block(None, 51_696_283).is_err());
+    }
+
+    #[test]
+    fn snapshot_block_rejects_a_database_past_the_stop_block() {
+        assert!(snapshot_block(Some(51_696_285), 51_696_283).is_err());
     }
 
     #[test]
