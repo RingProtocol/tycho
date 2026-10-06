@@ -1,3 +1,15 @@
+## [0.441.1](https://github.com/propeller-heads/tycho/compare/0.441.0...0.441.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **testing:** clarify range test snapshot block messages ([77469f5](https://github.com/propeller-heads/tycho/commit/77469f5c1563d5343a90670d9179302f240ad9c1))
+* **testing:** fail range tests whose expected components do not decode ([f085be1](https://github.com/propeller-heads/tycho/commit/f085be1b12ce32652681ea2f9ec84893597397e3))
+* **testing:** read range test snapshots at the last committed block ([77cb8c0](https://github.com/propeller-heads/tycho/commit/77cb8c00d34ad970c553ef4abecb837550a71b7c))
+* **testing:** read range test snapshots at the last committed block ([#1537](https://github.com/propeller-heads/tycho/issues/1537)) ([247cbf3](https://github.com/propeller-heads/tycho/commit/247cbf3a085a6c51abc10b44615693ddaac3430e))
+* **testing:** reject range tests reading past stop_block + 1 ([3cf5c10](https://github.com/propeller-heads/tycho/commit/3cf5c10a8df712d11ed30dae472c66917ea2e7a4))
+* **testing:** scope committed block query to protocol ([ff9d2d8](https://github.com/propeller-heads/tycho/commit/ff9d2d8c1287602e432a12e2038f6c29d42e5666))
+
 ## [0.441.0](https://github.com/propeller-heads/tycho/compare/0.440.1...0.441.0) (2026-10-06)
 
 
