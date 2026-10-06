@@ -78,6 +78,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("EkuboV3Robinhood", "robinhood", "ekubo_v3");
         _executor("FermiSwap", "ethereum", "vm:fermiswap");
         _executor("FluidV1", "ethereum", "fluid_v1");
+        _executor("LidoV4", "ethereum", "lido_v4");
         _executor("LiquidityParty", "ethereum", "vm:liquidityparty");
         _executor("LunarBase", "base", "lunarbase");
         _executor("MaverickV2", "ethereum", "vm:maverick_v2");
@@ -89,6 +90,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         _executor("UniswapV4", "ethereum", "uniswap_v4");
         // Stands in for whichever hook executor uniswap_v4_hooks is tested against.
         _executor("UniswapV4Angstrom", "ethereum", "uniswap_v4");
+        _executor("UniswapV4Robinhood", "robinhood", "uniswap_v4");
     }
 
     /// Deploys `fixture` on its fork and returns the runtime bytecode.
@@ -119,8 +121,9 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         // that check it for code can run.
         if (chain.eq(ETHEREUM)) return 23_000_000;
         // No Base or Robinhood constructor reads chain state yet; these only pin the fork.
+        // Both are past every address the deployment config names on the chain.
         if (chain.eq("base")) return 46_500_000;
-        if (chain.eq("robinhood")) return 40_000_000;
+        if (chain.eq("robinhood")) return 80_000_000;
         revert(
             string.concat(chain, " has no fork block; add one to _forkBlock")
         );

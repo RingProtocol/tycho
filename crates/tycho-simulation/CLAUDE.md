@@ -25,7 +25,9 @@ for any protocol indexed by Tycho.
     `ramses_v3/`, `ring_swap_v2/`, `lunarbase/`, `native_wrapper/`, `sky/`, `etherfi/`,
     `erc4626/`, `rocketpool/`): Pure Rust math, no EVM execution.
     `cpmm.rs` / `clmm.rs` / `safe_math.rs` / `u256_num.rs` / `utils.rs` are shared math helpers,
-    not protocols
+    not protocols. Uniswap V4 hook handlers register per `(Chain, hook address)` in
+    `uniswap_v4/hooks/hook_handler_creator.rs`; the generic VM fallback covers only Ethereum and
+    Unichain, and Pons V2 is the native handler for Robinhood
   - **Hybrid** (`fluid/`, `balancer_v3/`, `curve/`): native Rust quote math over VM-indexed pool
     state (each has both `state.rs` and `vm.rs`)
   - **VM** (`vm/`): Generic Solidity adapter (`TychoSimulationContract`) executed in `revm` for
@@ -41,11 +43,10 @@ for any protocol indexed by Tycho.
   auto-detection), and opt-in auto-detection additionally serves unknown venues under their
   address (`pricelevelstream:{0xaddress}`). Precedence: between `add_pamm` and `deny_pamm` for
   the same address the later call wins; `with_known_pamms` defaults never override either,
-  regardless of call order. `build` emits venues on Titan's PropAMMRouter whitelist under
-  `propammfallback:{pamm}` instead, so tycho-execution routes their swaps through the router
-  (Uniswap V3 fallback on venue revert); it reads that whitelist once on the first poll via
-  `RPC_URL`, and warns and stays on the direct path without it. `without_fallback_router` skips
-  the read and keeps every venue on the direct path. Venues may overlap with other integration
+  regardless of call order. By default `build` emits every venue under `fallback:{pamm}`, so
+  tycho-execution routes their swaps through `TychoFallbackRouter` (retry on a solver-named
+  fallback pool when the venue reverts); `without_fallback_router` keeps every venue on the
+  direct `pricelevelstream:` path. Venues may overlap with other integration
   paths of the same liquidity (e.g. `vm:fermiswap`) — consumers must deduplicate by venue where
   double-counting matters
 

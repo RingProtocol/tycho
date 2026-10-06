@@ -7,8 +7,8 @@ use crate::encoding::{
     evm::{
         constants::{
             DEFAULT_EXECUTORS_JSON, FALLBACK_KEY, FALLBACK_PREFIX, PRICE_LEVEL_STREAM_KEY,
-            PRICE_LEVEL_STREAM_PREFIX, PROPAMM_FALLBACK_KEY, PROPAMM_FALLBACK_PREFIX,
-            PROTOCOL_SPECIFIC_CONFIG, UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
+            PRICE_LEVEL_STREAM_PREFIX, PROTOCOL_SPECIFIC_CONFIG, SLIPSTREAMS_FORKS,
+            UNISWAP_V2_FORKS, UNISWAP_V3_FORKS,
         },
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
@@ -17,17 +17,21 @@ use crate::encoding::{
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
-            liquidity_party::LiquidityPartySwapEncoder, liquorice::LiquoriceSwapEncoder,
-            lunarbase::LunarBaseSwapEncoder, maverick_v2::MaverickV2SwapEncoder,
-            metric::MetricSwapEncoder, native::NativeSwapEncoder, native_wrap::WrapSwapEncoder,
-            propamm::PropAMMSwapEncoder, ring_swap_v2::RingSwapV2SwapEncoder,
-            rocketpool::RocketpoolSwapEncoder, sky::SkySwapEncoder,
-            slipstreams::SlipstreamsSwapEncoder, uniswap_v2::UniswapV2SwapEncoder,
-            uniswap_v3::UniswapV3SwapEncoder, uniswap_v4::UniswapV4SwapEncoder,
+            lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
+            liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
+            maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
+            native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
+            ring_swap_v2::RingSwapV2SwapEncoder, rocketpool::RocketpoolSwapEncoder,
+            sky::SkySwapEncoder, slipstreams::SlipstreamsSwapEncoder,
+            uniswap_v2::UniswapV2SwapEncoder, uniswap_v3::UniswapV3SwapEncoder,
+            uniswap_v4::UniswapV4SwapEncoder,
         },
     },
     swap_encoder::SwapEncoder,
 };
+
+/// The protocol system of a Uniswap V4 pool whose pool key names a hook.
+const UNISWAP_V4_HOOKS: &str = "uniswap_v4_hooks";
 
 /// Registry containing all supported `SwapEncoders`.
 #[derive(Clone)]
@@ -101,20 +105,22 @@ impl SwapEncoderRegistry {
     /// Price-level-stream protocols (`pricelevelstream:{protocol}`) without an exact entry fall
     /// back to the family entry registered under `pricelevelstream`, so a single configured
     /// executor address serves every pAMM — including auto-detected, address-named ones.
-    /// `propammfallback:{protocol}` and `fallback:{protocol}` resolve the same way against
-    /// `propammfallback` and `fallback`.
+    /// `fallback:{protocol}` resolves the same way against `fallback`.
+    ///
+    /// `uniswap_v4_hooks` without an exact entry resolves to the `uniswap_v4` encoder: a hooked
+    /// pool swaps through the same PoolManager and the same executor as a core V4 pool.
     #[allow(clippy::borrowed_box)]
     pub fn get_encoder(&self, protocol_system: &str) -> Option<&Box<dyn SwapEncoder>> {
         if let Some(encoder) = self.encoders.get(protocol_system) {
             return Some(encoder);
         }
+        if protocol_system == UNISWAP_V4_HOOKS {
+            return self.encoders.get("uniswap_v4");
+        }
         if protocol_system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
             return self
                 .encoders
                 .get(PRICE_LEVEL_STREAM_KEY);
-        }
-        if protocol_system.starts_with(PROPAMM_FALLBACK_PREFIX) {
-            return self.encoders.get(PROPAMM_FALLBACK_KEY);
         }
         if protocol_system.starts_with(FALLBACK_PREFIX) {
             return self.encoders.get(FALLBACK_KEY);
@@ -155,7 +161,9 @@ impl SwapEncoderRegistry {
             p if UNISWAP_V3_FORKS.contains(&p) => {
                 Ok(Box::new(UniswapV3SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "uniswap_v4" => {
+            // A hooked pool swaps through the same PoolManager as a core one; the encoder reads
+            // the pool's hook out of its `hooks` attribute either way.
+            "uniswap_v4" | UNISWAP_V4_HOOKS => {
                 Ok(Box::new(UniswapV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
             "ekubo_v2" => {
@@ -200,7 +208,7 @@ impl SwapEncoderRegistry {
             "vm:liquidityparty" => {
                 Ok(Box::new(LiquidityPartySwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "aerodrome_slipstreams" => {
+            p if SLIPSTREAMS_FORKS.contains(&p) => {
                 Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "rocketpool" => {
@@ -213,31 +221,6 @@ impl SwapEncoderRegistry {
             "lunarbase" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            "velodrome_slipstreams" => {
-                Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
-            }
-            // UP on Robinhood Chain deploys the Slipstream contracts verbatim, and its pools price
-            // swaps through a dynamic fee module, so it encodes like the other Slipstream forks.
-            "up_v3" => {
-                Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
-            }
-            // Ramses V3 reuses the standard Uniswap V3 executor unchanged, encoded via the
-            // Slipstreams encoder. Three things make this sound:
-            //   1. ABI match: the Ramses pool exposes the identical
-            //      `swap(address,bool,int256,uint160,bytes)` and calls `uniswapV3SwapCallback`,
-            //      which the router's selector-agnostic fallback routes back to the executor.
-            //   2. The executor's `_decodeData` reads only the pool address (bytes 43..63) and the
-            //      zero-for-one flag (byte 63): it calls `pool.swap` on that address without
-            //      recomputing it, and never touches the 3-byte slot at bytes 40..43. So it is
-            //      irrelevant both that Ramses keys pools by tick spacing rather than fee, and that
-            //      the Slipstreams encoder packs `tick_spacing` into that slot (where Uniswap V3
-            //      packs the fee).
-            //   3. The SlipstreamsExecutor contract is byte-for-byte identical to the
-            //      UniswapV3Executor, so the encoder choice does not imply a different on-chain
-            //      executor.
-            "ramses_v3" => {
-                Ok(Box::new(SlipstreamsSwapEncoder::new(executor_address, self.chain, config)?))
-            }
             "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }
@@ -248,15 +231,12 @@ impl SwapEncoderRegistry {
             // executor; the concrete protocol is identified by the component, not the encoder. The
             // bare family key serves every protocol via the `get_encoder` fallback;
             // protocol-specific `pricelevelstream:{protocol}` entries override it per
-            // protocol. The PropAMMRouter path takes the same calldata, so it reuses
-            // the same encoder and differs only in the executor address configured for
-            // the family.
-            pls if pls == PRICE_LEVEL_STREAM_KEY ||
-                pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) ||
-                pls == PROPAMM_FALLBACK_KEY ||
-                pls.starts_with(PROPAMM_FALLBACK_PREFIX) =>
-            {
+            // protocol.
+            pls if pls == PRICE_LEVEL_STREAM_KEY || pls.starts_with(PRICE_LEVEL_STREAM_PREFIX) => {
                 Ok(Box::new(PropAMMSwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "lido_v4" => {
+                Ok(Box::new(LidoV4SwapEncoder::new(executor_address, self.chain, config)?))
             }
             // The TychoFallbackRouter path carries the fallback protocol in the swap data, so it
             // needs its own encoder; the family resolves like the price-level-stream one.
@@ -273,6 +253,8 @@ impl SwapEncoderRegistry {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// A single `pricelevelstream` config entry serves the whole protocol family: the bare
@@ -300,52 +282,17 @@ mod tests {
             .is_none());
     }
 
-    /// The PropAMMRouter family resolves the same way, and to a different executor than the direct
-    /// path — same calldata, different call target.
+    /// The TychoFallbackRouter family resolves like the price-level-stream family: the single
+    /// `fallback` config entry serves the bare key and every `fallback:{protocol}` protocol,
+    /// against the `FallbackExecutor` address.
     #[test]
-    fn test_propamm_fallback_protocol_resolution() {
+    fn test_fallback_protocol_resolution() {
         let executors = std::fs::read_to_string("config/test_executor_addresses.json").unwrap();
         let registry = SwapEncoderRegistry::new(Chain::Ethereum)
             .add_default_encoders(Some(executors))
             .unwrap();
-
-        for protocol in [
-            PROPAMM_FALLBACK_KEY,
-            "propammfallback:fermiswap",
-            "propammfallback:0x5979458912f80b96d30d4220af8e2e4925a33320",
-        ] {
-            assert!(registry.get_encoder(protocol).is_some(), "no encoder resolved for {protocol}");
-        }
-
-        let direct = registry
-            .get_encoder("pricelevelstream:fermiswap")
-            .unwrap()
-            .executor_address()
-            .clone();
-        let via_router = registry
-            .get_encoder("propammfallback:fermiswap")
-            .unwrap()
-            .executor_address()
-            .clone();
-        assert_ne!(direct, via_router);
-    }
-
-    /// The TychoFallbackRouter family resolves like the other two pAMM families, against its own
-    /// encoder. No `fallback` entry ships in the executor configs until the FallbackExecutor is
-    /// deployed, so the test registers the family key itself.
-    #[test]
-    fn test_fallback_protocol_resolution() {
         let executor_address =
-            Bytes::from_str("0x5c2f5a71f67c01775180adc06909288b4c329308").unwrap();
-        let registry = SwapEncoderRegistry::new(Chain::Ethereum);
-        let config = HashMap::from([(
-            "angstrom_hook_address".to_string(),
-            "0x0000000aa232009084Bd71A5797d089AA4Edfad4".to_string(),
-        )]);
-        let encoder = registry
-            .create_encoder(FALLBACK_KEY, executor_address.clone(), Some(config))
-            .unwrap();
-        let registry = registry.register_encoder(FALLBACK_KEY, encoder);
+            Bytes::from_str("0x89CA9F4f77B267778EB2eA0Ba1bEAdEe8523af36").unwrap();
 
         for protocol in [
             FALLBACK_KEY,
@@ -374,6 +321,7 @@ mod tests {
             Chain::Polygon,
             Chain::Plasma,
             Chain::Robinhood,
+            Chain::Arc,
         ];
         for chain in chains {
             let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {
@@ -388,6 +336,53 @@ mod tests {
         }
     }
 
+    /// A hooked V4 pool encodes through the Uniswap V4 encoder, at the chain's `uniswap_v4`
+    /// executor address, whether or not the registry carries an explicit `uniswap_v4_hooks`
+    /// entry. A swap on such a pool is what the Robinhood Pons pools and the Ethereum Angstrom
+    /// pools both are.
+    #[rstest]
+    #[case::ethereum(Chain::Ethereum)]
+    #[case::robinhood(Chain::Robinhood)]
+    fn test_uniswap_v4_hooks_resolves_to_the_uniswap_v4_encoder(#[case] chain: Chain) {
+        let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap();
+
+        let core = registry
+            .get_encoder("uniswap_v4")
+            .expect("every chain configures the uniswap_v4 executor");
+        let hooked = registry
+            .get_encoder("uniswap_v4_hooks")
+            .expect("a hooked V4 pool must resolve to an encoder");
+
+        assert_eq!(hooked.executor_address(), core.executor_address());
+    }
+
+    /// A registry configured with `uniswap_v4_hooks` alone — what the integration-test harness
+    /// builds from a test config's protocol system — resolves both names to that entry's
+    /// executor rather than failing to build.
+    #[test]
+    fn test_registry_configured_with_uniswap_v4_hooks_alone_builds() {
+        let executor = "0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B";
+        let executors = format!(r#"{{"robinhood": {{"uniswap_v4_hooks": "{executor}"}}}}"#);
+
+        let registry = SwapEncoderRegistry::new(Chain::Robinhood)
+            .add_default_encoders(Some(executors))
+            .expect("a uniswap_v4_hooks entry must build an encoder");
+
+        let expected = Bytes::from_str(executor).unwrap();
+        assert_eq!(
+            registry
+                .get_encoder("uniswap_v4_hooks")
+                .expect("the configured protocol resolves")
+                .executor_address(),
+            &expected
+        );
+        // The fallback runs one way only, which is why the integration-test harness registers
+        // its executor under both names: swaps are grouped under `uniswap_v4` before the lookup.
+        assert!(registry
+            .get_encoder("uniswap_v4")
+            .is_none());
+    }
+
     #[test]
     fn test_executor_addresses_match_registered_encoders() {
         let registry = SwapEncoderRegistry::new_with_defaults(Chain::Ethereum).unwrap();
@@ -400,26 +395,6 @@ mod tests {
                 .get_encoder(&protocol)
                 .unwrap_or_else(|| panic!("no encoder registered for {protocol}"));
             assert_eq!(encoder.executor_address(), &executor_address);
-        }
-    }
-
-    /// The `fallback` section duplicates the `uniswap_v4` Angstrom hook address: the uniswap_v4
-    /// encoder fetches attestations for that hook, the fallback encoder rejects it. A chain
-    /// carrying both entries must keep them in lockstep, e.g. when Angstrom redeploys its hook.
-    #[test]
-    fn test_fallback_angstrom_hook_matches_uniswap_v4() {
-        let config: HashMap<Chain, HashMap<String, HashMap<String, String>>> =
-            serde_json::from_str(PROTOCOL_SPECIFIC_CONFIG).unwrap();
-        for (chain, protocols) in config {
-            let Some(fallback) = protocols.get(FALLBACK_KEY) else { continue };
-            assert_eq!(
-                fallback.get("angstrom_hook_address"),
-                protocols
-                    .get("uniswap_v4")
-                    .and_then(|uniswap_v4| uniswap_v4.get("angstrom_hook_address")),
-                "chain {chain}: the fallback and uniswap_v4 sections of \
-                 protocol_specific_addresses.json must name the same Angstrom hook"
-            );
         }
     }
 }

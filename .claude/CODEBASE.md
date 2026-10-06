@@ -94,10 +94,16 @@ Protocol Substreams modules live under `protocols/` as a separate WASM workspace
 
 7. WebSocket subscribers (`services/ws.rs`) receive broadcast directly; revert flag signals chain
    reorg. On `ExtractorRestarted`, `ws.rs` sends `Response::SubscriptionEnded` and `PendingDeltas`
-   resets that extractor's buffer
-8. `PendingDeltasBuffer` (`services/deltas_buffer.rs`) receives broadcast
-   - Inserts every full block (partial blocks skipped)
-   - Auto-drains blocks ≤ `db_committed_block_height` (already in DB, no longer "pending")
+   folds that extractor's committed blocks into the sink and clears its window
+8. `PendingDeltas` (`services/deltas_buffer.rs`) receives broadcast
+   - Inserts every full block (partial blocks skipped) into that extractor's `DeltaWindow`.
+     Evicted blocks fold into `DiscardSink`; the `EntityCache` is built from one database
+     snapshot before the server starts when `ENTITY_CACHE_MODE` is not `off`, and ENG-6293
+     makes it the window fold sink and the read source
+   - Retains a block until it is at or below `min(finalized, db_committed, tip - depth)`, then
+     folds it into a `FoldSink` and evicts it; committed blocks stay servable meanwhile
+   - A block the window cannot apply ends the pump and the process; the window cannot refill
+     itself (see `crates/tycho-indexer/CLAUDE.md`, "Reorg handling")
    - RPC handlers query DB snapshot + pending deltas = consistent view of latest state
 
 ### Client (tycho-client)
@@ -195,6 +201,9 @@ error rather than a silent custom chain (`Chain::builtin_from_str` skips the reg
 | `MAIN_WORKER_THREADS` | Server runtime threads (default 3) |
 | `RPC_MAX_RETRIES` / `RPC_INITIAL_BACKOFF_MS` / `RPC_MAX_BACKOFF_MS` | RPC retry policy |
 | `RPC_MAX_BATCH_SIZE` / `RPC_STORAGE_SLOT_MAX_BATCH_SIZE` | RPC request batching limits |
+| `DELTA_WINDOW_DEPTH` | Blocks each extractor's RPC-side window retains (default 128) |
+| `DELTA_WINDOW_FOLD_BATCH` | Evictable blocks required before a fold runs (default 1) |
+| `ENTITY_CACHE_MODE` | `off` (default), `shadow`, or `serve`; anything but `off` loads the entity cache at startup (not folded into or served yet, ENG-6293) |
 | `TYCHO_S3_BUCKET` | S3 bucket the Substreams spkg packages are fetched from |
 | `OTLP_EXPORTER_ENDPOINT` | OpenTelemetry trace exporter |
 | `RUST_LOG` | Tracing filter (e.g. `tycho_indexer=debug`) |

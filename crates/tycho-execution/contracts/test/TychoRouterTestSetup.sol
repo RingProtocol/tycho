@@ -16,11 +16,9 @@ import {
 import {HashflowExecutor} from "../src/executors/HashflowExecutor.sol";
 import {MaverickV2Executor} from "../src/executors/MaverickV2Executor.sol";
 import {PropAMMExecutor} from "../src/executors/PropAMMExecutor.sol";
-import {
-    PropAMMFallbackExecutor
-} from "../src/executors/PropAMMFallbackExecutor.sol";
 import {FallbackExecutor} from "../src/executors/FallbackExecutor.sol";
 import {TychoFallbackRouter} from "../src/fallback/TychoFallbackRouter.sol";
+import {IUniswapV3StaticQuoter} from "@interfaces/IUniswapV3StaticQuoter.sol";
 import {UniswapV2Executor} from "../src/executors/UniswapV2Executor.sol";
 import {
     UniswapV3Executor,
@@ -32,6 +30,7 @@ import {SlipstreamsExecutor} from "../src/executors/SlipstreamsExecutor.sol";
 import {RocketpoolExecutor} from "../src/executors/RocketpoolExecutor.sol";
 import {ERC4626Executor} from "../src/executors/ERC4626Executor.sol";
 import {NativeWrapExecutor} from "../src/executors/NativeWrapExecutor.sol";
+import {LidoV4Executor} from "../src/executors/LidoV4Executor.sol";
 import {LiquoriceExecutor} from "../src/executors/LiquoriceExecutor.sol";
 import {AerodromeV1Executor} from "../src/executors/AerodromeV1Executor.sol";
 import {MetricExecutor} from "../src/executors/MetricExecutor.sol";
@@ -128,6 +127,7 @@ contract TychoRouterTestSetup is
     RocketpoolExecutor public rocketpoolExecutor;
     ERC4626Executor public erc4626Executor;
     NativeWrapExecutor public nativeWrapExecutor;
+    LidoV4Executor public lidoV4Executor;
     EkuboV3Executor public ekuboV3Executor;
     EtherfiExecutor public etherfiExecutor;
     LiquidityPartyExecutor public liquidityPartyExecutor;
@@ -139,7 +139,6 @@ contract TychoRouterTestSetup is
     RingSwapV2Executor public ringSwapV2Executor;
     NativeExecutor public nativeExecutor;
     PropAMMExecutor public propAMMExecutor;
-    PropAMMFallbackExecutor public propAMMFallbackExecutor;
     SkyExecutor public skyExecutor;
     TychoFallbackRouter public fallbackRouter;
     FallbackExecutor public fallbackExecutor;
@@ -229,7 +228,7 @@ contract TychoRouterTestSetup is
         rocketpoolExecutor = new RocketpoolExecutor(ROCKET_DEPOSIT_POOL);
         erc4626Executor = new ERC4626Executor();
         nativeWrapExecutor = new NativeWrapExecutor(WETH_ADDR);
-        ekuboV3Executor = new EkuboV3Executor();
+        ekuboV3Executor = new EkuboV3Executor(EKUBO_V3_SIGNED_EXCLUSIVE_SWAP);
         // Etch placeholder bytecode if Etherfi contracts are not yet deployed
         // on this chain/block (e.g. non-mainnet forks or early mainnet blocks).
         if (EETH_ADDR.code.length == 0) vm.etch(EETH_ADDR, bytes("1"));
@@ -266,7 +265,6 @@ contract TychoRouterTestSetup is
         ringSwapV2Executor =
             new RingSwapV2Executor(RING_FEW_FACTORY, RING_SWAP_FACTORY);
         propAMMExecutor = new PropAMMExecutor();
-        propAMMFallbackExecutor = new PropAMMFallbackExecutor();
         // Every executor's address here is deterministic from its deploy order, and the
         // Rust-generated calldata.txt hardcodes those addresses, so inserting a deployment
         // invalidates every entry after it. Add new deployments at the end of this block.
@@ -294,8 +292,15 @@ contract TychoRouterTestSetup is
             nativeExecutor = new NativeExecutor(nativeRouterV6);
         }
 
-        fallbackRouter = new TychoFallbackRouter(poolManager, FLUIDV1_LIQUIDITY);
+        fallbackRouter = new TychoFallbackRouter(
+            poolManager,
+            FLUIDV1_LIQUIDITY,
+            IUniswapV3StaticQuoter(UNISWAP_V3_STATIC_QUOTER)
+        );
         fallbackExecutor = new FallbackExecutor(address(fallbackRouter));
+        // Last, per the note above: Lido V4 is only configured on mainnet, where both Sky and
+        // Native always deploy, so appending it shifts no address before it.
+        lidoV4Executor = new LidoV4Executor(STETH_ADDR, WSTETH_ADDR);
 
         address[] memory executors = new address[](
             28 + (skyDeployable ? 1 : 0) + (supportsNative ? 1 : 0)
@@ -326,8 +331,8 @@ contract TychoRouterTestSetup is
         executors[23] = address(bopAMMExecutor);
         executors[24] = address(ringSwapV2Executor);
         executors[25] = address(propAMMExecutor);
-        executors[26] = address(propAMMFallbackExecutor);
-        executors[27] = address(fallbackExecutor);
+        executors[26] = address(fallbackExecutor);
+        executors[27] = address(lidoV4Executor);
         uint256 nextExecutorIndex = 28;
         if (skyDeployable) {
             executors[nextExecutorIndex] = address(skyExecutor);
@@ -336,6 +341,7 @@ contract TychoRouterTestSetup is
         if (supportsNative) {
             executors[nextExecutorIndex] = address(nativeExecutor);
         }
+
         return executors;
     }
 
@@ -344,6 +350,7 @@ contract TychoRouterTestSetup is
         if (block.chainid == 8453) return NATIVE_ROUTER_V6_BASE;
         if (block.chainid == 42161) return NATIVE_ROUTER_V6_ARBITRUM;
         if (block.chainid == 56) return NATIVE_ROUTER_V6_BSC;
+        if (block.chainid == 4663) return NATIVE_ROUTER_V6_ROBINHOOD;
         return address(0);
     }
 

@@ -43,7 +43,11 @@ services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
   rpc.rs                    HTTP endpoints: state snapshots, component queries
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
-  deltas_buffer.rs          PendingDeltasBuffer — pending-block state for RPC consistency
+  deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
+  state/
+    window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
+    cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
+    service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -128,8 +132,13 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
    state is always on the canonical chain.
 
-`PendingDeltasBuffer` (RPC side) mirrors this with its own `ReorgBuffer`, using the strict
-hash-only `purge` on the block named by the broadcast revert message.
+`PendingDeltas` (RPC side) mirrors this through its per-extractor `DeltaWindow`, using the
+strict hash-only `purge` on the block named by the broadcast revert message. A revert to a block
+below `min(finalized, db_committed)`, a revert to an unknown hash, or a block that does not
+extend the window's chain is an error that ends the pump and the process: only the extractor's
+replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
+blocks into the sink and clears it; the restarted extractor replays everything above its
+database cursor.
 
 ## Persistence
 
@@ -153,8 +162,26 @@ clients). When an RPC query arrives, the handler fetches the DB snapshot then ap
 pending deltas on top, giving a consistent view up to the chain tip. Without this feed the RPC
 would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
-`db_committed_block_height` on each message tells `PendingDeltasBuffer` when a block has been
-written; it auto-drains those blocks so memory usage stays bounded.
+`db_committed_block_height` on each message is one of the three watermarks bounding retention.
+Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until it is at or below
+`min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
+Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
+to `depth` blocks: readers that merge both sides must bound window reads by `db_committed + 1`.
+Depth and fold batching come from `--delta-window-depth` (default 128) and
+`--delta-window-fold-batch` (default 1).
+
+With `--entity-cache-mode shadow|serve`, `main.rs` builds the `EntityCache` from one database
+snapshot after the extractors are built and before the server starts (`EntityCache::load` in
+`services/state/cache.rs`), and hands it to the services. The windows fold into it, under the
+window lock. A failed load is a setup error and ends the process. `off` (the default) skips the
+load, and the windows fold into `DiscardSink`.
+
+In `serve`, `RpcHandler` (`services/rpc.rs`) asks the `StateService` (`services/state/service.rs`)
+first for `/contract_state` and `/protocol_state`. The service answers from the cache plus the
+window changes up to the requested version, without reading the database. A request it cannot
+answer comes back as a `FallbackReason`, and the handler answers it from the database path and
+counts it in `db_path_requests{endpoint, reason}`. `shadow` answers every request from the
+database path.
 
 ## Connections
 
@@ -167,8 +194,12 @@ ExtractorSupervisor (supervisor.rs) — rebuilds the runner via ExtractorFactory
        │    └─ DCIPlugin (dynamic_contract_indexer/) [optional]
        └─ broadcast DeltaCommand (Block | ExtractorRestarted)
             ├─ WsService (services/ws.rs) → WebSocket clients
-            └─ PendingDeltasBuffer (services/deltas_buffer.rs)
-                 └─ RpcHandlers (services/rpc.rs) → HTTP responses
+            └─ PendingDeltas (services/deltas_buffer.rs)
+                 └─ DeltaWindow per extractor (services/state/window.rs)
+                      ├─ folds into EntityCache (services/state/cache.rs) [shadow|serve], else DiscardSink
+                      ├─ StateService (services/state/service.rs) ← EntityCache [serve]
+                      └─ RpcHandlers (services/rpc.rs) → HTTP responses
+                           (state endpoints: StateService first, database path on a fallback)
 ```
 
 ## Client Sync

@@ -101,3 +101,6 @@ forge script script/WriteRuntimeBytecodeFixtures.s.sol
 
 The FeeCalculator fixture is a fresh deployment with zero fees, so it is a no-op during simulation
 (the router calls it on every swap to read the router fee rate).
+
+`UniswapV4Robinhood.runtime.json` builds like the others, from `(robinhood, uniswap_v4)` on a
+Robinhood fork, so `forge test` catches drift if the Robinhood executor changes.

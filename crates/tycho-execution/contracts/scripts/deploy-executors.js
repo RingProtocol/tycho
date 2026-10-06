@@ -35,8 +35,10 @@ const deploy_protocols = {
         "rfq:metric",
         "pricelevelstream",
         "rfq:native",
-        "propammfallback",
         "sky",
+        "lido_v4",
+        "etherfi",
+        "fallback",
     ],
     "base": [
         "uniswap_v2",
@@ -48,7 +50,8 @@ const deploy_protocols = {
         "native_wrapper",
         "lunarbase",
         "rfq:metric",
-        "rfq:native"
+        "rfq:native",
+        "fallback",
     ],
     "unichain": [
         "uniswap_v2",
@@ -95,6 +98,12 @@ const deploy_protocols = {
         "ekubo_v3",
         "native_wrapper",
         "rfq:metric",
+        "rfq:native",
+    ],
+    "arc": [
+        "uniswap_v2",
+        "uniswap_v3",
+        "uniswap_v4",
     ],
 };
 

@@ -132,7 +132,12 @@ pub const UNISWAP_V2_FORKS: &[&str] =
 
 /// Uniswap V3 and its forks share `UniswapV3SwapEncoder`; see [`UNISWAP_V2_FORKS`].
 pub const UNISWAP_V3_FORKS: &[&str] =
-    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3"];
+    &["uniswap_v3", "pancakeswap_v3", "sushiswap_v3", "robinswap_v3", "gigadex_v3"];
+
+/// Slipstream deployments and forks. They share `SlipstreamsSwapEncoder`, which packs
+/// `tick_spacing` where `UniswapV3SwapEncoder` packs the fee. The pool ABI is Uniswap V3's.
+pub const SLIPSTREAMS_FORKS: &[&str] =
+    &["aerodrome_slipstreams", "velodrome_slipstreams", "up_v3", "ramses_v3"];
 
 /// Protocol system prefix carried by components sourced from the pAMM price level stream. The
 /// venue suffix is either a configured name (e.g. `pricelevelstream:fermiswap`) or, for
@@ -145,26 +150,9 @@ pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// so a single configured executor address covers every pAMM, including auto-detected ones.
 pub const PRICE_LEVEL_STREAM_KEY: &str = "pricelevelstream";
 
-/// Protocol system prefix for pAMM components executed through the PropAMMRouter, so a stale maker
-/// quote retries on Uniswap V3 instead of reverting the route. Venue suffixes follow
-/// `PRICE_LEVEL_STREAM_PREFIX`; only whitelisted venues may use it. Calldata matches the direct
-/// path, so both prefixes share `PropAMMSwapEncoder` and differ only in the executor.
-///
-/// Deprecated with `PropAMMFallbackExecutor`: encode no new routes against this family, use
-/// [`FALLBACK_PREFIX`] instead.
-pub const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
-
-/// The executor-config key serving the whole PropAMMRouter protocol family, mirroring
-/// `PRICE_LEVEL_STREAM_KEY`.
-///
-/// Deprecated with `PROPAMM_FALLBACK_PREFIX`: use [`FALLBACK_KEY`] instead.
-pub const PROPAMM_FALLBACK_KEY: &str = "propammfallback";
-
 /// Protocol system prefix for pAMM components executed through `TychoFallbackRouter`, which
 /// retries a failing pAMM on the fallback protocol named in the swap's `user_data`. Protocol
-/// suffixes follow `PRICE_LEVEL_STREAM_PREFIX`. Replaces `PROPAMM_FALLBACK_PREFIX` (Titan's
-/// PropAMMRouter, deprecated): any pAMM qualifies, and the solver picks the fallback protocol per
-/// swap instead of the router owning one Uniswap V3 mapping.
+/// suffixes follow `PRICE_LEVEL_STREAM_PREFIX`.
 pub const FALLBACK_PREFIX: &str = "fallback:";
 
 /// The executor-config key serving the whole fallback protocol family, mirroring
@@ -180,7 +168,6 @@ mod tests {
     #[test]
     fn test_family_keys_and_prefixes_agree() {
         assert_eq!(format!("{PRICE_LEVEL_STREAM_KEY}:"), PRICE_LEVEL_STREAM_PREFIX);
-        assert_eq!(format!("{PROPAMM_FALLBACK_KEY}:"), PROPAMM_FALLBACK_PREFIX);
         assert_eq!(format!("{FALLBACK_KEY}:"), FALLBACK_PREFIX);
     }
 
