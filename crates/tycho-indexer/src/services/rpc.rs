@@ -4,11 +4,16 @@ use std::{
     sync::Arc,
 };
 
-use actix_web::{http::StatusCode, web, HttpResponse, ResponseError};
+use actix_web::{
+    http::{header::ContentType, StatusCode},
+    web, HttpResponse, ResponseError,
+};
 use anyhow::Error;
 use chrono::{Duration, Utc};
 use diesel_async::pooled_connection::deadpool;
+use serde::Serialize;
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
@@ -116,6 +121,8 @@ pub struct RpcHandler<G, T> {
     protocol_systems: Vec<String>,
     /// Which path answers state requests. `Off` without extractors.
     state_service: EntityCacheSetup<Arc<StateService>>,
+    /// Bounds the state responses built or serialized at once, see [`run_off_worker`].
+    off_worker_permits: Arc<Semaphore>,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -170,6 +177,7 @@ where
             dci_protocols,
             protocol_systems,
             state_service: EntityCacheSetup::Off,
+            off_worker_permits: Arc::new(Semaphore::new(request_worker_count())),
         }
     }
 
@@ -186,9 +194,9 @@ where
     }
 
     /// The state service, when it answers requests itself: `serve` mode only.
-    fn serving_state_service(&self) -> Option<&StateService> {
+    fn serving_state_service(&self) -> Option<Arc<StateService>> {
         match &self.state_service {
-            EntityCacheSetup::Serve(service) => Some(service),
+            EntityCacheSetup::Serve(service) => Some(Arc::clone(service)),
             // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
             // it with the database answer.
             EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
@@ -282,10 +290,15 @@ where
     /// the database path.
     async fn get_contract_state_routed(
         &self,
-        request: dto::StateRequestBody,
+        mut request: dto::StateRequestBody,
     ) -> Result<dto::StateRequestResponse, RpcError> {
         if let Some(service) = self.serving_state_service() {
-            match service.contract_state(&request) {
+            let (result, returned) = run_off_worker(&self.off_worker_permits, move || {
+                (service.contract_state(&request), request)
+            })
+            .await?;
+            request = returned;
+            match result {
                 Ok(response) => return Ok(response),
                 Err(StateServiceError::Fallback(reason)) => count_db_path("contract_state", reason),
                 Err(err) => return Err(err.into()),
@@ -523,10 +536,15 @@ where
     /// the database path.
     async fn get_protocol_state_routed(
         &self,
-        request: dto::ProtocolStateRequestBody,
+        mut request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
         if let Some(service) = self.serving_state_service() {
-            match service.protocol_state(&request) {
+            let (result, returned) = run_off_worker(&self.off_worker_permits, move || {
+                (service.protocol_state(&request), request)
+            })
+            .await?;
+            request = returned;
+            match result {
                 Ok(response) => return Ok(response),
                 Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
                 Err(err) => return Err(err.into()),
@@ -1156,6 +1174,63 @@ impl From<StateServiceError> for RpcError {
     }
 }
 
+/// Number of actix request workers: actix starts one per available CPU unless configured.
+fn request_worker_count() -> usize {
+    std::thread::available_parallelism().map_or(1, usize::from)
+}
+
+/// Runs `work` on the blocking thread pool and waits for its result.
+///
+/// A request worker serves all requests on its connections from one thread, so CPU-heavy work
+/// that runs on it delays every other request it serves. Building or serializing a large state
+/// response can take seconds; running it here keeps the worker free. At most `permits` jobs run
+/// at once, so no more large responses are held in memory at once than when they ran on the
+/// workers. A job keeps its permit until `work` returns, also when the caller stops waiting, as
+/// it does when a client disconnects.
+///
+/// # Errors
+///
+/// Returns [`RpcError::Unknown`] if `permits` is closed or `work` panics.
+async fn run_off_worker<R, F>(permits: &Arc<Semaphore>, work: F) -> Result<R, RpcError>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    let permit = Arc::clone(permits)
+        .acquire_owned()
+        .await
+        .map_err(|err| RpcError::Unknown(format!("Off-worker permits closed: {err}")))?;
+    tokio::task::spawn_blocking(move || {
+        let result = work();
+        drop(permit);
+        result
+    })
+    .await
+    .map_err(|err| RpcError::Unknown(format!("Off-worker task failed: {err}")))
+}
+
+/// Serializes `value` as the JSON body of a `200 OK` response, off the request worker.
+///
+/// The response matches [`HttpResponse::json`]: same body and `Content-Type: application/json`.
+///
+/// # Errors
+///
+/// Returns [`RpcError::Unknown`] if serialization fails or [`run_off_worker`] fails.
+async fn json_off_worker<V>(
+    permits: &Arc<Semaphore>,
+    value: Arc<V>,
+) -> Result<HttpResponse, RpcError>
+where
+    V: Serialize + Send + Sync + 'static,
+{
+    let body = run_off_worker(permits, move || serde_json::to_vec(value.as_ref()))
+        .await?
+        .map_err(|err| RpcError::Unknown(format!("Failed to serialize response: {err}")))?;
+    Ok(HttpResponse::Ok()
+        .content_type(ContentType::json())
+        .body(body))
+}
+
 /// Counts a state request the entity cache handed to the database path.
 fn count_db_path(endpoint: &'static str, reason: FallbackReason) {
     metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
@@ -1216,13 +1291,11 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     }
 
     // Call the handler to get the state
-    let response = handler
-        .into_inner()
-        .get_contract_state(&body)
-        .await;
+    let handler = handler.into_inner();
+    let response = handler.get_contract_state(&body).await;
 
     match response {
-        Ok(state) => Ok(HttpResponse::Ok().json(state)),
+        Ok(state) => json_off_worker(&handler.off_worker_permits, state).await,
         Err(err) => {
             error!(error = %err, ?body, "Error while getting contract state.");
             Err(err)
@@ -1355,13 +1428,11 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     }
 
     // Call the handler to get protocol states
-    let response = handler
-        .into_inner()
-        .get_protocol_state(&body)
-        .await;
+    let handler = handler.into_inner();
+    let response = handler.get_protocol_state(&body).await;
 
     match response {
-        Ok(state) => Ok(HttpResponse::Ok().json(state)),
+        Ok(state) => json_off_worker(&handler.off_worker_permits, state).await,
         Err(err) => {
             error!(error = %err, ?body, "Error while getting protocol states.");
             Err(err)
@@ -3663,5 +3734,123 @@ plans:
         } else {
             assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
         }
+    }
+
+    /// Waits until `permits` has `n` permits available, and fails after one second.
+    async fn wait_for_available_permits(permits: &Semaphore, n: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while permits.available_permits() != n {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("permits were not released");
+    }
+
+    // `tokio::test` runs on one thread. Work that ran on it would block the release below until
+    // `recv_timeout` gives up.
+    #[tokio::test]
+    async fn run_off_worker_keeps_the_runtime_free_while_the_work_blocks() {
+        let permits = Arc::new(Semaphore::new(1));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+
+        let job = run_off_worker(&permits, move || {
+            released
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok()
+        });
+        let release = async move { release.send(()).unwrap() };
+        let (released_in_time, ()) = tokio::join!(job, release);
+
+        assert!(released_in_time.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_off_worker_keeps_the_permit_until_the_work_returns() {
+        let permits = Arc::new(Semaphore::new(1));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+
+        // Stop waiting while the work still runs, as the handler does when a client disconnects.
+        let gave_up = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            run_off_worker(&permits, move || {
+                released.recv().ok();
+            }),
+        )
+        .await;
+
+        assert!(gave_up.is_err());
+        assert_eq!(permits.available_permits(), 0);
+        release.send(()).unwrap();
+        wait_for_available_permits(&permits, 1).await;
+    }
+
+    #[tokio::test]
+    async fn run_off_worker_runs_no_more_jobs_than_permits() {
+        let permits = Arc::new(Semaphore::new(1));
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let first = tokio::spawn({
+            let permits = Arc::clone(&permits);
+            async move {
+                run_off_worker(&permits, move || {
+                    released.recv().ok();
+                })
+                .await
+            }
+        });
+        wait_for_available_permits(&permits, 0).await;
+
+        let second_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second = tokio::spawn({
+            let permits = Arc::clone(&permits);
+            let started = Arc::clone(&second_started);
+            async move {
+                run_off_worker(&permits, move || {
+                    started.store(true, std::sync::atomic::Ordering::SeqCst)
+                })
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!second_started.load(std::sync::atomic::Ordering::SeqCst));
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert!(second_started.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn run_off_worker_reports_a_panicking_job_and_frees_its_permit() {
+        let permits = Arc::new(Semaphore::new(1));
+
+        let result = run_off_worker(&permits, || -> () { panic!("job failed") }).await;
+
+        assert!(matches!(result, Err(RpcError::Unknown(_))));
+        wait_for_available_permits(&permits, 1).await;
+    }
+
+    #[actix_web::test]
+    async fn json_off_worker_answers_like_http_response_json() {
+        let value = Arc::new(serde_json::json!({
+            "accounts": [{"address": "0x01", "slots": {"0x02": "0x03", "0x04": "0x"}}],
+            "pagination": {"page": 0, "page_size": 10, "total": 1}
+        }));
+        let expected = HttpResponse::Ok().json(Arc::clone(&value));
+
+        let actual = json_off_worker(&Arc::new(Semaphore::new(1)), value)
+            .await
+            .unwrap();
+
+        assert_eq!(actual.status(), expected.status());
+        let content_type = actix_web::http::header::CONTENT_TYPE;
+        assert_eq!(actual.headers().get(&content_type), expected.headers().get(&content_type));
+        let actual_body = actix_web::body::to_bytes(actual.into_body())
+            .await
+            .unwrap();
+        let expected_body = actix_web::body::to_bytes(expected.into_body())
+            .await
+            .unwrap();
+        assert_eq!(actual_body, expected_body);
     }
 }
