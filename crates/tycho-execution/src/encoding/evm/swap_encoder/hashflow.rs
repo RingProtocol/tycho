@@ -222,11 +222,10 @@ mod test {
 
         assert_eq!(
             error,
-            EncodingError::SignedQuoteShortfall {
-                protocol: "rfq:hashflow".to_string(),
-                shortfall_bps: 100,
-                max_shortfall_bps: 50,
-            }
+            EncodingError::RecoverableError(
+                "rfq:hashflow signed 100 bps below its price levels; the swap allows 50 bps"
+                    .to_string()
+            )
         );
     }
 
@@ -235,14 +234,24 @@ mod test {
         let error = encode_shortfall_test_swap(&shortfall_test_swap(Some(100))).unwrap_err();
 
         // The shortfall passes; encoding then stops on the mock quote's missing attributes.
-        assert!(!matches!(error, EncodingError::SignedQuoteShortfall { .. }), "{error:?}");
+        assert!(
+            !error
+                .to_string()
+                .contains("below its price levels"),
+            "{error:?}"
+        );
     }
 
     #[test]
     fn test_encode_hashflow_signed_quote_shortfall_without_limit() {
         let error = encode_shortfall_test_swap(&shortfall_test_swap(None)).unwrap_err();
 
-        assert!(!matches!(error, EncodingError::SignedQuoteShortfall { .. }), "{error:?}");
+        assert!(
+            !error
+                .to_string()
+                .contains("below its price levels"),
+            "{error:?}"
+        );
     }
 
     #[test]
