@@ -86,11 +86,11 @@ time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated
 deploys it at an address derived from the contract name, with executor constructor arguments read
 from `crates/tycho-execution/config/executor_deployments.json`. An executor fixture forks the
 chain it is deployed on, at a block pinned per chain, unless its constructor reads state that
-block does not carry — in which case it names a fork of its own.
+block does not carry — in which case it pins a block of its own.
 
 ```bash
 cd ../../crates/tycho-execution/contracts
-export RPC_URL=.. BASE_RPC_URL=.. ROBINHOOD_RPC_URL=..   # one per chain with a listed executor
+export RPC_URL=..   # and the other [rpc_endpoints] in foundry.toml, one per chain with a listed executor
 
 # Verify the committed fixtures match the current contracts (forge test runs this in CI)
 forge test --match-contract RuntimeBytecodeFixtures

@@ -142,22 +142,15 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         string memory deploymentChain,
         string memory protocol
     ) internal {
-        _executor(
-            name,
-            deploymentChain,
-            protocol,
-            deploymentChain,
-            _forkBlock(deploymentChain)
-        );
+        _executor(name, deploymentChain, protocol, _forkBlock(deploymentChain));
     }
 
-    /// Lists an executor fixture against a fork it names itself, for a constructor that reads
-    /// state the deployment chain's pinned block does not carry.
+    /// Lists an executor fixture that pins a block of its own on `deploymentChain`, for a
+    /// constructor that reads state the chain's pinned block does not carry.
     function _executor(
         string memory name,
         string memory deploymentChain,
         string memory protocol,
-        string memory chain,
         uint256 blockNumber
     ) internal {
         string memory key = string.concat(
@@ -183,7 +176,13 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
             vm.parseJsonUintArray(_deployments, string.concat(key, ".args"))
         );
         _fixtures.push(
-            Fixture(name, contractName, constructorArgs, chain, blockNumber)
+            Fixture(
+                name,
+                contractName,
+                constructorArgs,
+                deploymentChain,
+                blockNumber
+            )
         );
     }
 

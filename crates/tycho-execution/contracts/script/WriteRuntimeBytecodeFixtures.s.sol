@@ -7,8 +7,8 @@ import {RuntimeBytecodeFixtures} from "../test/RuntimeBytecodeFixtures.sol";
 ///
 ///   forge script script/WriteRuntimeBytecodeFixtures.s.sol
 ///
-/// The deploys stay on local forks, so the script takes no `--broadcast`. Requires `RPC_URL`,
-/// `BASE_RPC_URL` and `ROBINHOOD_RPC_URL`: each fixture forks the chain its executor is deployed on.
+/// The deploys stay on local forks, so the script takes no `--broadcast`. Forks through the
+/// `[rpc_endpoints]` aliases in `foundry.toml`, one per chain with a listed executor.
 contract WriteRuntimeBytecodeFixtures is RuntimeBytecodeFixtures, Script {
     function run() public {
         _listFixtures();
