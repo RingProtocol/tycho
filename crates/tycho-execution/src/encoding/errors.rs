@@ -13,6 +13,8 @@ use tycho_common::simulation::errors::SimulationError;
 /// - `RecoverableError`: Indicates that the encoding has failed with a recoverable error. Retrying
 ///   at a later time may succeed. It may have failed due to a temporary issue, such as a network
 ///   problem.
+/// - `SignedQuoteShortfall`: An RFQ maker signed for less than its price levels give for the same
+///   input, by more than the swap allows.
 #[derive(Error, Debug, PartialEq)]
 pub enum EncodingError {
     #[error("Invalid input: {0}")]
@@ -23,6 +25,11 @@ pub enum EncodingError {
     RecoverableError(String),
     #[error("Not implemented: {0}")]
     NotImplementedError(String),
+    #[error(
+        "{protocol} signed {shortfall_bps} bps below its price levels; the swap allows \
+         {max_shortfall_bps} bps"
+    )]
+    SignedQuoteShortfall { protocol: String, shortfall_bps: u64, max_shortfall_bps: u32 },
 }
 
 impl From<io::Error> for EncodingError {

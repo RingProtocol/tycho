@@ -281,17 +281,22 @@ pub(crate) async fn get_client() -> Result<EVMProvider, EncodingError> {
     Ok(Arc::new(client))
 }
 
-/// Records how far a maker's signed RFQ quote lands from the price levels of `protocol_state`.
+/// Records how far a maker's signed RFQ quote lands from the price levels of `protocol_state`,
+/// and enforces the swap's `max_signed_quote_shortfall_bps`.
 ///
 /// Prices `signed_quote.amount_in` on `protocol_state` and emits a debug event with that level
 /// amount, `signed_quote.amount_out` and the gap between them in basis points. A negative gap
 /// means the maker signed for less than its levels advertised. If the levels cannot price the
 /// signed input, it logs a warning instead.
-pub(crate) fn record_signed_quote_deviation(
+///
+/// Returns `EncodingError::SignedQuoteShortfall` when the signed amount out is further below the
+/// level amount than the swap allows. A swap without a limit, or a quote the levels cannot price,
+/// passes.
+pub(crate) fn check_signed_quote(
     swap: &Swap,
     protocol_state: &dyn ProtocolSim,
     signed_quote: &SignedQuote,
-) {
+) -> Result<(), EncodingError> {
     let component = swap.component();
     let labels = [("protocol", component.protocol_system.clone())];
     let level_amount_out = match protocol_state.get_amount_out(
@@ -311,7 +316,7 @@ pub(crate) fn record_signed_quote_deviation(
                 error = %err,
                 "could not price a signed RFQ quote on its price levels"
             );
-            return;
+            return Ok(());
         }
     };
     let deviation_bps = deviation_bps(&level_amount_out, &signed_quote.amount_out);
@@ -331,6 +336,36 @@ pub(crate) fn record_signed_quote_deviation(
         Some(bps) => histogram!("rfq_signed_quote_deviation_bps", &labels).record(bps as f64),
         None => counter!("rfq_signed_quote_unpriced_total", &labels).increment(1),
     }
+    let Some(max_shortfall_bps) = swap.max_signed_quote_shortfall_bps() else { return Ok(()) };
+    match shortfall_beyond(&level_amount_out, &signed_quote.amount_out, max_shortfall_bps) {
+        Some(shortfall_bps) => Err(EncodingError::SignedQuoteShortfall {
+            protocol: component.protocol_system.clone(),
+            shortfall_bps,
+            max_shortfall_bps,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Returns how far `signed_amount_out` is below `level_amount_out`, in basis points rounded up,
+/// when that is more than `max_shortfall_bps`.
+///
+/// The comparison is exact. Returns `None` when the shortfall is within the limit, when the maker
+/// signed for at least the level amount, or when `level_amount_out` is zero.
+fn shortfall_beyond(
+    level_amount_out: &BigUint,
+    signed_amount_out: &BigUint,
+    max_shortfall_bps: u32,
+) -> Option<u64> {
+    if *level_amount_out == BigUint::ZERO || signed_amount_out >= level_amount_out {
+        return None;
+    }
+    let scaled_shortfall = (level_amount_out - signed_amount_out) * 10_000u32;
+    if scaled_shortfall <= level_amount_out * max_shortfall_bps {
+        return None;
+    }
+    let shortfall_bps = (scaled_shortfall + level_amount_out - 1u32) / level_amount_out;
+    Some(u64::try_from(&shortfall_bps).unwrap_or(u64::MAX))
 }
 
 /// Returns `(signed - level) / level` in whole basis points, truncated toward zero.
@@ -417,6 +452,22 @@ mod tests {
         assert_eq!(deviation_bps(&level, &BigUint::from(1_005_000u64)), Some(50));
         assert_eq!(deviation_bps(&level, &BigUint::from(999_950u64)), Some(0));
         assert_eq!(deviation_bps(&level, &BigUint::ZERO), Some(-10_000));
+    }
+
+    #[test]
+    fn test_shortfall_beyond() {
+        let level = BigUint::from(1_000_000u64);
+        assert_eq!(shortfall_beyond(&level, &BigUint::from(995_000u64), 50), None);
+        assert_eq!(shortfall_beyond(&level, &BigUint::from(994_999u64), 50), Some(51));
+        assert_eq!(shortfall_beyond(&level, &BigUint::from(990_000u64), 50), Some(100));
+        assert_eq!(shortfall_beyond(&level, &BigUint::from(1_000_001u64), 0), None);
+        assert_eq!(shortfall_beyond(&level, &BigUint::from(999_999u64), 0), Some(1));
+        assert_eq!(shortfall_beyond(&level, &BigUint::ZERO, 50), Some(10_000));
+    }
+
+    #[test]
+    fn test_shortfall_beyond_zero_level() {
+        assert_eq!(shortfall_beyond(&BigUint::ZERO, &BigUint::from(1u64), 0), None);
     }
 
     #[test]
