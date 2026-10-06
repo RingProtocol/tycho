@@ -1,3 +1,11 @@
+## [0.441.0](https://github.com/propeller-heads/tycho/compare/0.440.1...0.441.0) (2026-10-06)
+
+
+### Features
+
+* load traced entry points per component in one query ([af01902](https://github.com/propeller-heads/tycho/commit/af01902d4409a1682bb3f71d6c1f8cbcce3feaed))
+* load traced entry points per component in one query ([#1542](https://github.com/propeller-heads/tycho/issues/1542)) ([7439831](https://github.com/propeller-heads/tycho/commit/7439831c1a857438ce4e239a5ded91f7227b3dc7))
+
 ## [0.440.1](https://github.com/propeller-heads/tycho/compare/0.440.0...0.440.1) (2026-10-06)
 
 
