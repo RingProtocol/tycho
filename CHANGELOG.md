@@ -1,3 +1,25 @@
+## [0.445.0](https://github.com/propeller-heads/tycho/compare/0.444.0...0.445.0) (2026-10-07)
+
+
+### Features
+
+* **execution:** add BebopFallbackRouter and BebopFallbackExecutor ([02e19d6](https://github.com/propeller-heads/tycho/commit/02e19d6f5234390c906076f06f9f0dd3e7b9d586))
+* **execution:** add HashflowFallbackRouter and HashflowFallbackExecutor ([f2f8d37](https://github.com/propeller-heads/tycho/commit/f2f8d3741d8bd9f5df3f8dfc13a39f33c2a22dbc))
+* **execution:** add Metric, Bebop and Hashflow fallback routers on a shared base ([#1518](https://github.com/propeller-heads/tycho/issues/1518)) ([7563c01](https://github.com/propeller-heads/tycho/commit/7563c013fd920aab5df99546bf340e2f8c3cf131))
+* **execution:** add MetricFallbackRouter and MetricFallbackExecutor ([db46550](https://github.com/propeller-heads/tycho/commit/db46550c3bdbd501acd72d2a0865cfb1a61cd61b))
+* **execution:** deploy any fallback router from deploy-fallback-router.js ([3727609](https://github.com/propeller-heads/tycho/commit/3727609efbad91115dadb1553cc7d74ca6fb46af))
+* **execution:** encode swaps for the Metric and Bebop fallback routers ([30c2448](https://github.com/propeller-heads/tycho/commit/30c24486e97fef54a2c7487a8b81165beb7bf135))
+* **execution:** quote Metric by simulation on chains without a quoter ([39912b3](https://github.com/propeller-heads/tycho/commit/39912b358f728132c416adbb04bfea183b0efcec))
+* **execution:** quote Metric only by simulation ([d45a9dc](https://github.com/propeller-heads/tycho/commit/d45a9dc031b0224fb447beeaa019e84881353a14))
+* **execution:** run fallbacks on Robinhood ([48506cd](https://github.com/propeller-heads/tycho/commit/48506cdf7e41eb76ca6411e515020ec35c1d3870))
+* **simulation:** label Metric and Bebop components for the fallback router ([92d3348](https://github.com/propeller-heads/tycho/commit/92d33485294eb6d4b1f7320328aa920654ada41f))
+
+
+### Bug Fixes
+
+* **execution:** add a gas buffer to executor deployments ([6cf101f](https://github.com/propeller-heads/tycho/commit/6cf101f4056206fa6e83b562272bc4527c51cb48))
+* **execution:** list the fallback executors in the deployment registry ([a431278](https://github.com/propeller-heads/tycho/commit/a431278c359f2b6ee0e423d9ffeb67fbbbeb5f97))
+
 ## [0.444.0](https://github.com/propeller-heads/tycho/compare/0.443.0...0.444.0) (2026-10-07)
 
 
