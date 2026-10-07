@@ -1,3 +1,19 @@
+## [0.443.0](https://github.com/propeller-heads/tycho/compare/0.442.0...0.443.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **execution:** EncodingError gains the SignedQuoteShortfall variant. The
+enum is not #[non_exhaustive], so callers that match it exhaustively no
+longer compile.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+
+### Features
+
+* **execution:** fail an RFQ encode on a signed quote short of its levels ([cc27d4b](https://github.com/propeller-heads/tycho/commit/cc27d4b53740dfbaa83dad7c02e3c72394c72159))
+* **execution:** fail an RFQ encode on a signed quote short of its levels ([#1552](https://github.com/propeller-heads/tycho/issues/1552)) ([ceba841](https://github.com/propeller-heads/tycho/commit/ceba841eccce4612c2131ae91e244cd9f028884d))
+
 ## [0.442.0](https://github.com/propeller-heads/tycho/compare/0.441.1...0.442.0) (2026-10-06)
 
 
