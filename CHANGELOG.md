@@ -1,3 +1,11 @@
+## [0.444.0](https://github.com/propeller-heads/tycho/compare/0.443.0...0.444.0) (2026-10-07)
+
+
+### Features
+
+* **client:** decode contract state faster and in parallel ([#1553](https://github.com/propeller-heads/tycho/issues/1553)) ([47a3eb6](https://github.com/propeller-heads/tycho/commit/47a3eb66ca8160f43fad9e4965403fbc5e49b3d1))
+* **client:** fetch contract state in smaller chunks, decoded in parallel ([8c7b0aa](https://github.com/propeller-heads/tycho/commit/8c7b0aa703ab2701906047c61987b94a683ed709))
+
 ## [0.443.0](https://github.com/propeller-heads/tycho/compare/0.442.0...0.443.0) (2026-10-07)
 
 
