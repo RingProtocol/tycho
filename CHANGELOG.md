@@ -1,3 +1,27 @@
+## [0.449.0](https://github.com/propeller-heads/tycho/compare/0.448.1...0.449.0) (2026-10-08)
+
+
+### Features
+
+* **simulation:** add price level stream metrics facade ([5cabfa3](https://github.com/propeller-heads/tycho/commit/5cabfa3ad09ede3e9b9224fd3c43ae86dc70e9d3))
+* **simulation:** bound, retry, and refresh the PropAMMRouter whitelist read ([45483e2](https://github.com/propeller-heads/tycho/commit/45483e27f7a2745c39e82add6923c685b80d663c))
+* **simulation:** expire price level components per component ([9da7e37](https://github.com/propeller-heads/tycho/commit/9da7e37d67bbc766094dd2e47ca3687829a9441e))
+* **simulation:** expire stale price level components on a deadline timer ([130dfc4](https://github.com/propeller-heads/tycho/commit/130dfc497ff268ba5cec5c873992b73168a5ef4a))
+* **simulation:** fail closed on stale Titan price levels ([#1428](https://github.com/propeller-heads/tycho/issues/1428)) ([47f32a3](https://github.com/propeller-heads/tycho/commit/47f32a3f7cc2237e165a1a721ea4de6861b542fc))
+* **simulation:** move pAMM components between families on whitelist change ([3f90301](https://github.com/propeller-heads/tycho/commit/3f90301fcc58499875b533ea56be2e2f7a36598c))
+* **simulation:** parse the Titan price level frame timestamp ([da13658](https://github.com/propeller-heads/tycho/commit/da136585c78d6854aa4cb1938b2d87aea80e4750))
+* **simulation:** refuse price level quotes older than one block ([871f9bb](https://github.com/propeller-heads/tycho/commit/871f9bb50b80303a27b32b705eae679c97472999))
+* **simulation:** validate price level frames by timestamp and block ([81314d3](https://github.com/propeller-heads/tycho/commit/81314d3219231c3d80908ba9fce9cfae73736268))
+
+
+### Bug Fixes
+
+* **simulation:** close the whole-branch review findings ([041bbe8](https://github.com/propeller-heads/tycho/commit/041bbe89e8ee4849e47b058912c6ad9fad0b303c))
+* **simulation:** count only parsed Titan frames as liveness ([42d8194](https://github.com/propeller-heads/tycho/commit/42d819461429cdccb09cf250805a88afd6c7d5fb))
+* **simulation:** count only socket waits toward the Titan idle timeout ([916bf78](https://github.com/propeller-heads/tycho/commit/916bf7849492a070a1aec71c17d1bc819c25c8e4))
+* **simulation:** justify the temporary dead_code allow on timestamp ([7e29462](https://github.com/propeller-heads/tycho/commit/7e29462c72ae5367f7259de001e91b533fa17854))
+* **simulation:** reset the block frontier whenever nothing is served ([b509646](https://github.com/propeller-heads/tycho/commit/b5096462b8dc73a8adb1ff27b6ede319b97cc825))
+
 ## [0.448.1](https://github.com/propeller-heads/tycho/compare/0.448.0...0.448.1) (2026-10-08)
 
 
