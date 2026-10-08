@@ -187,21 +187,3 @@ pub type BookFeedWatch<A = ReceivedAt> = SnapshotFeedWatch<BookSnapshot<A>, Feed
 
 /// How a book feed ended. See [`SnapshotFeedWatch::ended`].
 pub type BookFeedOutcome = SnapshotFeedOutcome<FeedError>;
-
-/// Builds the token map of a test [`BookFeedConfig`] from `(address, symbol, decimals)` entries.
-#[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
-)]
-pub(crate) fn test_token_map(entries: &[(&Bytes, &str, u32)]) -> HashMap<Bytes, Token> {
-    entries
-        .iter()
-        .map(|(address, symbol, decimals)| {
-            (
-                (*address).clone(),
-                Token::new(address, symbol, *decimals, 0, &[Some(10_000)], Chain::Ethereum, 100),
-            )
-        })
-        .collect()
-}
