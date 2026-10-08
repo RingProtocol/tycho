@@ -210,37 +210,6 @@ where
         }
     }
 
-    /// The entity cache's answer to `request`, built off the request worker. `None` when the
-    /// cache does not serve, or hands the request to the database path; a hand-off is counted in
-    /// `db_path_requests`.
-    async fn cache_answer<Req, Resp>(
-        &self,
-        endpoint: Endpoint,
-        request: &Req,
-        answer: fn(&StateService, &Req) -> Result<Resp, StateServiceError>,
-    ) -> Result<Option<Resp>, RpcError>
-    where
-        Req: Clone + Send + 'static,
-        Resp: Send + 'static,
-    {
-        let Some(service) = self.serving_state_service() else {
-            return Ok(None);
-        };
-        let request = request.clone();
-        match self
-            .off_worker
-            .build(move || answer(&service, &request))
-            .await?
-        {
-            Ok(response) => Ok(Some(response)),
-            Err(StateServiceError::Fallback(reason)) => {
-                count_db_path(endpoint, reason);
-                Ok(None)
-            }
-            Err(err) => Err(err.into()),
-        }
-    }
-
     /// Resolves plan restrictions from the `X-User-Plan` header.
     /// Returns `None` when no header is present (no restrictions apply).
     fn resolve_plan_restrictions(&self, req: &actix_web::HttpRequest) -> Option<&PlanRestrictions> {
@@ -331,11 +300,19 @@ where
         &self,
         request: dto::StateRequestBody,
     ) -> Result<dto::StateRequestResponse, RpcError> {
-        if let Some(response) = self
-            .cache_answer(Endpoint::ContractState, &request, StateService::contract_state)
-            .await?
-        {
-            return Ok(response);
+        if let Some(service) = self.serving_state_service() {
+            let cache_request = request.clone();
+            let answer = self
+                .off_worker
+                .build(move || service.contract_state(&cache_request))
+                .await?;
+            match answer {
+                Ok(response) => return Ok(response),
+                Err(StateServiceError::Fallback(reason)) => {
+                    count_db_path(Endpoint::ContractState, reason)
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         if let Some(shadow) = self.sampling_shadow(&request) {
             let sampled = SampledRequest {
@@ -599,11 +576,19 @@ where
         &self,
         request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
-        if let Some(response) = self
-            .cache_answer(Endpoint::ProtocolState, &request, StateService::protocol_state)
-            .await?
-        {
-            return Ok(response);
+        if let Some(service) = self.serving_state_service() {
+            let cache_request = request.clone();
+            let answer = self
+                .off_worker
+                .build(move || service.protocol_state(&cache_request))
+                .await?;
+            match answer {
+                Ok(response) => return Ok(response),
+                Err(StateServiceError::Fallback(reason)) => {
+                    count_db_path(Endpoint::ProtocolState, reason)
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         if let Some(shadow) = self.sampling_shadow(&request) {
             let sampled = SampledRequest {
