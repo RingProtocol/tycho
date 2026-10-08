@@ -126,16 +126,17 @@ impl BookFeedConfig {
         Some((self.tokens.get(a)?, self.tokens.get(b)?))
     }
 
-    /// Whether a book with `tvl_usd` clears the floor; logs the book it filters out.
+    /// Whether a book with `tvl_usd` clears the floor; names `book_label` in the log line when
+    /// it does not.
     #[expect(
         dead_code,
         reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
     )]
-    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, book: impl fmt::Display) -> bool {
+    pub(crate) fn clears_min_tvl(&self, tvl_usd: f64, book_label: impl fmt::Display) -> bool {
         let clears = tvl_usd >= self.min_tvl_usd;
         if !clears {
             debug!(
-                book = %book,
+                book = %book_label,
                 tvl_usd,
                 min_tvl_usd = self.min_tvl_usd,
                 "filtering out book below the TVL floor"
