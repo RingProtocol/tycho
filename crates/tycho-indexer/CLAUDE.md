@@ -48,6 +48,7 @@ services/
     window.rs               DeltaWindow — fixed-depth block window; retention, fold-on-eviction
     cache.rs                EntityCache — long-lived timestamped entity store (a FoldSink); EntityCache::load builds it from one StateSnapshotGateway read at startup
     service.rs              StateService — answers contract/protocol state from cache ⊕ window, or names a FallbackReason; EntityCacheSetup (the routing itself is in rpc.rs)
+    shadow.rs               Shadow mode — samples state requests, runs the cache path next to the DB path, compares the normalized answers, records metrics
   cache.rs                  HTTP response cache
   api_docs.rs               OpenAPI schema generation (utoipa)
   access_control.rs         API-key authentication middleware
@@ -162,7 +163,10 @@ clients). When an RPC query arrives, the handler fetches the DB snapshot then ap
 pending deltas on top, giving a consistent view up to the chain tip. Without this feed the RPC
 would lag by however many blocks remain in `ReorgBuffer` awaiting finalization.
 
-`db_committed_block_height` on each message is one of the three watermarks bounding retention.
+`db_committed_block_height` on each message is the height whose writes reached Postgres
+(`CachedGateway::flushed_block_height`), not the last drained block: during catch-up the gateway
+holds the tail of a drained batch in memory until the next flush. It is one of the three
+watermarks bounding retention.
 Each extractor's `DeltaWindow` (`services/state/window.rs`) keeps a block until it is at or below
 `min(finalized, db_committed, tip - depth)`, then folds it into a `FoldSink` and evicts it.
 Committed blocks are therefore retained and served, so window contents and DB rows overlap by up
@@ -182,6 +186,19 @@ window changes up to the requested version, without reading the database. A requ
 answer comes back as a `FallbackReason`, and the handler answers it from the database path and
 counts it in `db_path_requests{endpoint, reason}`. `shadow` answers every request from the
 database path.
+
+In `shadow`, a sampled `/contract_state` or `/protocol_state` request runs the database path (the
+client's answer), then `StateService`, and `services/state/shadow.rs` compares the two.
+It erases the known differences from both answers and requires the rest to be equal. On a
+mismatch it logs one warning with up to 20 diffs (`entity.field.key: db=… cache=…`).
+A `/contract_state` comparison where every differing account has an unsaved change in another
+extractor's window, at or below the version, counts as `known_mismatch` and logs its diffs at
+`debug`, not as a warning: the cache path applies that change, the database path does not.
+A comparison is discarded when it straddles a change: the window generation or the cache fold
+count moved during it.
+`--entity-cache-shadow-sample-rate` (default 0.0) sets the share. Metrics:
+`entity_cache_shadow_comparisons_total{endpoint,outcome}`,
+`entity_cache_shadow_duration_seconds{endpoint}`, `entity_cache_shadow_sample_rate`.
 
 ## Connections
 
