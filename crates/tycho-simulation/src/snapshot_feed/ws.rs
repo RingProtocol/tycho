@@ -42,10 +42,9 @@ pub struct WsFeedConfig {
     pub max_snapshot_age: Option<Duration>,
 }
 
-/// The values every WebSocket feed builder starts from: 10 s handshake deadline, 60 s idle
-/// window, a reconnect wait of 1 s doubling to at most 32 s, retry forever, and withdrawal after
-/// 60 s without a snapshot, which is the idle window — the moment the loop declares the socket
-/// dead it also stops serving the snapshot.
+/// The values every WebSocket feed builder starts from. The relation among them worth keeping
+/// through a retune: the withdrawal age is the idle window, so the moment the loop gives up on
+/// the socket it stops serving what that socket brought.
 pub(crate) fn default_ws_feed_config() -> WsFeedConfig {
     WsFeedConfig {
         connect_timeout: Duration::from_secs(10),
@@ -354,7 +353,7 @@ mod tests {
         WsFeedConfig { backoff_unit: Duration::from_millis(1), ..default_ws_feed_config() }
     }
 
-    /// Delivers `script` to [`read_next_book`] as a connection would, each frame after its own
+    /// Delivers `script` to [`read_next_snapshot`] as a connection would, each frame after its own
     /// wait, and then stays silent forever. Nothing here touches a socket, so on a paused clock
     /// the frames arrive at exactly the times the script names.
     fn scripted_frames(

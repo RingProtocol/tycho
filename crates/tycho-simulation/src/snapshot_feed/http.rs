@@ -35,26 +35,18 @@ pub struct HttpFeedConfig {
     /// `None` retries forever.
     pub max_consecutive_failures: Option<u32>,
     /// Withdraw the published snapshot (publish `None`) once it is this old, so consumers stop
-    /// using data nobody is refreshing; the next successful poll restores it.
-    ///
-    /// Age is measured on the machine's monotonic clock from the last publish, so it bounds
-    /// staleness whether a failing provider refuses instantly or hangs to `request_timeout`.
-    ///
-    /// Leaving room for the healthy cadence — a poll starts every `poll_interval` and may take
-    /// up to `request_timeout` — keeps a snapshot servable from one poll to the next. Below the
-    /// interval it is a duty cycle instead: the feed serves each snapshot for `max_snapshot_age`
-    /// and nothing for the rest of the interval, which is what a consumer that would rather
-    /// decline than quote an old book wants from a venue whose rate limit sets the cadence. Only
-    /// zero is rejected, with `InvalidInput`, since it would serve nothing at all.
-    ///
-    /// `None` keeps the last snapshot until the feed ends. Default: 30 s.
+    /// using data nobody is refreshing; the next successful poll restores it. Age runs from the
+    /// last publish on the monotonic clock, so it bounds staleness whether a failing provider
+    /// refuses instantly or hangs to `request_timeout`. An age that does not exceed
+    /// `poll_interval` is a duty cycle: each snapshot served for this long, then nothing until
+    /// the next poll. Zero is `InvalidInput`; `None` keeps the last snapshot until the feed
+    /// ends.
     pub max_snapshot_age: Option<Duration>,
 }
 
-/// The values every HTTP feed builder starts from: poll every 5 s with a 10 s deadline per poll,
-/// stretch that to 10, 20 and at most 40 s while polls keep failing, retry forever, and withdraw
-/// a snapshot that has gone 30 s without being refreshed — two polls' worth of silence with room
-/// for one hung poll on top.
+/// The values every HTTP feed builder starts from. The relation among them worth keeping through
+/// a retune: the withdrawal age outlasts a poll that hangs to its deadline, so one slow poll does
+/// not blank the book.
 #[expect(
     dead_code,
     reason = "nothing in this crate implements a book feed yet; the layer is exercised by its own tests"
@@ -139,10 +131,8 @@ pub(crate) trait HttpSource: Send + Sync {
 /// Every snapshot the provider answers with, and as a last item the error the feed gives up on.
 ///
 /// One fetch is one poll, started every `poll_interval` and given `request_timeout` to answer; an
-/// error or an overrun is one failed poll, after which the gap to the next one doubles per further
-/// failure up to `max_backoff_exp` times, so a provider that is down or rate-limiting is not
-/// polled at the healthy cadence for the whole outage. `max_consecutive_failures` failed polls in
-/// a row end the stream with the last one's error. Each fetch runs in a `poll` span.
+/// error or an overrun is one failed poll. Failures back off, and run out, as [`HttpFeedConfig`]
+/// describes. Each fetch runs in a `poll` span.
 ///
 /// Waiting out the cadence and the backoff happens in here, so the one who awaits the next
 /// snapshot waits exactly as long as it takes — which is how a published one can go stale on time
@@ -175,8 +165,8 @@ fn polled_snapshots<S: HttpSource>(
 
     try_stream! {
         loop {
-            // The backoff stands in for the tick rather than following it: it is already a
-            // multiple of the interval, and the ticker's own deadline would expire during it.
+            // The backoff stands in for the tick: it is already a multiple of the interval, and
+            // the ticker's own deadline expires while it waits.
             match backoff.take() {
                 Some(backoff) => {
                     sleep(backoff).await;
