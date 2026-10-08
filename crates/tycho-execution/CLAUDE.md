@@ -620,6 +620,9 @@ Features: `evm` (default, enables alloy + reqwest), `fork-tests` (mainnet fork t
 9. List the executor in `contracts/test/RuntimeBytecodeFixtures.sol`, regenerate the
    protocol-testing fixtures with `forge script script/WriteRuntimeBytecodeFixtures.s.sol` (from
    `contracts/`) and commit `protocols/testing/fixtures/<Name>.runtime.json`.
+10. After deploying, add the address to `substreams/executors.sql` as well as
+    `config/executor_addresses.json`, or router-trades dashboards show its hops without a protocol name.
+    `make check-executors` (run by Router Trades CI) fails until it is there.
 
 ## Security
 
