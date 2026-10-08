@@ -1,3 +1,14 @@
+## [0.448.1](https://github.com/propeller-heads/tycho/compare/0.448.0...0.448.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **indexer:** build and serialize state responses off the request workers ([05481d2](https://github.com/propeller-heads/tycho/commit/05481d2719f1dfa41a459608b105257c8a7777b6))
+* **indexer:** build and serialize state responses off the request workers ([#1549](https://github.com/propeller-heads/tycho/issues/1549)) ([7ccdaeb](https://github.com/propeller-heads/tycho/commit/7ccdaeb182ef98e950007713f451a42a00107f1f))
+* **indexer:** gate off-worker serialization on estimated JSON size ([8c6d37d](https://github.com/propeller-heads/tycho/commit/8c6d37df7c6fda0beadc0d157a1a6c9f9b2a3346))
+* **indexer:** give each state endpoint its own off-worker pools ([acec463](https://github.com/propeller-heads/tycho/commit/acec463efe854c6cb3f59205f9e5e8ec3a4f39ca))
+* **indexer:** split off-worker pools, keep small responses on workers ([e35c81c](https://github.com/propeller-heads/tycho/commit/e35c81c97d6cc23dbbb91214972d0db32facdc45))
+
 ## [0.448.0](https://github.com/propeller-heads/tycho/compare/0.447.1...0.448.0) (2026-10-08)
 
 
