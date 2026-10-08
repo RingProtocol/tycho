@@ -30,6 +30,11 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
     /// Stands in for every role admin and fee receiver: those land in storage, not in bytecode.
     address constant PLACEHOLDER_ADMIN = address(1);
 
+    /// Keep aligned with EXECUTOR_ADDRESS in crates/tycho-test/src/execution/encoding.rs.
+    /// Self-address immutables must point at the code protocol-testing plants there.
+    address constant EXECUTOR_ADDRESS =
+        0xaE04CA7E9Ed79cBD988f6c536CE11C621166f41B;
+
     struct Fixture {
         string name;
         string contractName;
@@ -38,6 +43,7 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         /// in foundry.toml.
         string chain;
         uint256 blockNumber;
+        address deploymentAddress;
     }
 
     Fixture[] internal _fixtures;
@@ -96,22 +102,14 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
     /// Deploys `fixture` on its fork and returns the runtime bytecode.
     function _build(Fixture memory fixture) internal returns (bytes memory) {
         vm.createSelectFork(vm.rpcUrl(fixture.chain), fixture.blockNumber);
-        return _deployDeterministic(
-            fixture.contractName, fixture.constructorArgs
-        )
-        .code;
-    }
-
-    /// Deploys `contractName` at an address derived from that name alone, so it does not depend
-    /// on the caller (test or script), on the order in which contracts are deployed, on the
-    /// contract's own bytecode, or on where its source sits in the tree. The constructor runs at
-    /// the final address, so an immutable that stores `address(this)` is stable too.
-    function _deployDeterministic(
-        string memory contractName,
-        bytes memory constructorArgs
-    ) internal returns (address deployed) {
-        deployed = address(bytes20(keccak256(bytes(contractName))));
-        deployCodeTo(contractName, constructorArgs, deployed);
+        // Each fixture has its own fork, so executors can share the consumer's address.
+        // Running the constructor there also makes immutable self-calls target that code.
+        deployCodeTo(
+            fixture.contractName,
+            fixture.constructorArgs,
+            fixture.deploymentAddress
+        );
+        return fixture.deploymentAddress.code;
     }
 
     /// Block a chain's fixtures fork at. Pinned so a fixture is reproducible, and past the state
@@ -134,7 +132,14 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
         internal
     {
         _fixtures.push(
-            Fixture(name, name, constructorArgs, ETHEREUM, _forkBlock(ETHEREUM))
+            Fixture(
+                name,
+                name,
+                constructorArgs,
+                ETHEREUM,
+                _forkBlock(ETHEREUM),
+                address(bytes20(keccak256(bytes(name))))
+            )
         );
     }
 
@@ -184,7 +189,8 @@ abstract contract RuntimeBytecodeFixtures is CommonBase, StdCheats {
                 contractName,
                 constructorArgs,
                 deploymentChain,
-                blockNumber
+                blockNumber,
+                EXECUTOR_ADDRESS
             )
         );
     }

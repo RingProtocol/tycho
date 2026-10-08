@@ -82,11 +82,13 @@ Execution validation overrides the TychoRouterV3, FeeCalculator, and protocol ex
 time with the runtime bytecode in `fixtures/*.runtime.json`. These are generated from the
 `tycho-execution` contracts, so they must be regenerated whenever those contracts change.
 
-`crates/tycho-execution/contracts/test/RuntimeBytecodeFixtures.sol` lists every fixture and
-deploys it at an address derived from the contract name, with executor constructor arguments read
-from `crates/tycho-execution/config/executor_deployments.json`. An executor fixture forks the
-chain it is deployed on, at a block pinned per chain, unless its constructor reads state that
-block does not carry — in which case it pins a block of its own.
+`crates/tycho-execution/contracts/test/RuntimeBytecodeFixtures.sol` lists every fixture and reads
+executor constructor arguments from `crates/tycho-execution/config/executor_deployments.json`.
+Executor fixtures deploy at `tycho-test`'s `EXECUTOR_ADDRESS`, where execution validation plants
+their code, so immutable self-addresses remain callable. The router and fee calculator use
+addresses derived from their contract names. Each fixture has its own fork; an executor forks
+its deployment chain at a pinned block, unless its constructor needs state from a different block
+on that chain.
 
 ```bash
 cd ../../crates/tycho-execution/contracts

@@ -510,6 +510,9 @@ Contract changes can alter the runtime bytecode fixtures `protocol-testing` plan
 `test/RuntimeBytecodeFixtures.t.sol` checks them as part of `forge test`, and
 `forge script script/WriteRuntimeBytecodeFixtures.s.sol` regenerates them for you to commit. Foundry
 pins the compiler and omits the metadata hash to keep these fixtures reproducible.
+Executor fixtures deploy at `tycho-test`'s `EXECUTOR_ADDRESS` so immutable self-calls still reach
+their code after planting. `test/RuntimeBytecodeFixturesExecution.t.sol` checks both Uniswap V4
+self-call paths against the committed fixtures at that address.
 
 ### Rust
 
