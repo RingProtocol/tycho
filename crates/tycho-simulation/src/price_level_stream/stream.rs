@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_stream::stream;
@@ -21,23 +21,11 @@ use crate::protocol::models::Update;
 /// Static attribute under which each emitted component carries its pAMM venue address.
 pub const PAMM_ADDRESS_ATTRIBUTE: &str = "pamm_address";
 
-/// The longest [`stale_after`](PriceLevelStreamBuilder::stale_after) a stream can be built
-/// with. Quotes target the block being built, so serving a ladder for longer than this is never
-/// intended, and deadlines that far ahead stay representable on the monotonic clock.
+/// The longest [`stale_after`](PriceLevelStreamBuilder::stale_after) the builder accepts;
+/// longer values are capped to it. Quotes target the block being built, so serving a ladder for
+/// longer than this is never intended, and deadlines this far ahead stay representable on the
+/// monotonic clock.
 pub const MAX_STALE_AFTER: Duration = Duration::from_secs(3600);
-
-/// Why [`PriceLevelStreamBuilder::build`] refused to open the stream.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum PriceLevelStreamBuildError {
-    /// [`stale_after`](PriceLevelStreamBuilder::stale_after) is zero or longer than
-    /// [`MAX_STALE_AFTER`].
-    #[error("stale_after must be longer than zero and at most {MAX_STALE_AFTER:?}, got {given:?}")]
-    StaleAfterOutOfRange {
-        /// The value the builder was given.
-        given: Duration,
-    },
-}
 
 /// Builds a stream of [`Update`]s from the Titan pAMM price level WebSocket.
 ///
@@ -226,10 +214,11 @@ impl PriceLevelStreamBuilder {
     /// Independent of this setting, a state refuses to quote once its frame is one slot old
     /// (see [`without_quote_guard`](Self::without_quote_guard)).
     ///
-    /// Must be longer than zero and at most [`MAX_STALE_AFTER`]; [`build`](Self::build) fails
-    /// otherwise.
+    /// Values above [`MAX_STALE_AFTER`] are capped to it. A value shorter than the age frames
+    /// arrive with rejects every frame as `too_old`, which the
+    /// `price_level_stream_frames_rejected_total` counter and a WARN log show.
     pub fn stale_after(mut self, duration: Duration) -> Self {
-        self.stale_after = duration;
+        self.stale_after = duration.min(MAX_STALE_AFTER);
         self
     }
 
@@ -276,12 +265,7 @@ impl PriceLevelStreamBuilder {
     /// carry a lower block than the removal did: that is how the stream recovers from a frame
     /// with an implausible block, so consumers must not rely on the block number to order
     /// updates across such a gap. See the [module documentation](super) for the full contract.
-    ///
-    /// # Errors
-    ///
-    /// Fails with [`StaleAfterOutOfRange`](PriceLevelStreamBuildError::StaleAfterOutOfRange)
-    /// when [`stale_after`](Self::stale_after) is zero or longer than [`MAX_STALE_AFTER`].
-    pub fn build(self) -> Result<impl Stream<Item = Update> + Send, PriceLevelStreamBuildError> {
+    pub fn build(self) -> impl Stream<Item = Update> + Send {
         let Self {
             registry,
             denied,
@@ -294,9 +278,6 @@ impl PriceLevelStreamBuilder {
             stale_after,
             quote_guard,
         } = self;
-        if stale_after.is_zero() || stale_after > MAX_STALE_AFTER {
-            return Err(PriceLevelStreamBuildError::StaleAfterOutOfRange { given: stale_after });
-        }
         if registry.is_empty() && !auto_detect {
             tracing::warn!(
                 "No pAMMs registered and auto-detection is off; the stream will never produce \
@@ -326,7 +307,7 @@ impl PriceLevelStreamBuilder {
             quote_guard,
         });
 
-        Ok(stream! {
+        stream! {
             let frames = titan::messages(url, connection);
             tokio::pin!(frames);
             loop {
@@ -335,7 +316,7 @@ impl PriceLevelStreamBuilder {
                     deadline.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                 );
                 let update = tokio::select! {
-                    Some(frame) = frames.next() => tracker.on_frame(frame, Now::at(timer_now())),
+                    Some(frame) = frames.next() => tracker.on_frame(frame, now()),
                     () = sleep_until_deadline, if deadline.is_some() => {
                         tracker.on_stale_deadline(timer_now())
                     }
@@ -344,7 +325,33 @@ impl PriceLevelStreamBuilder {
                     yield update;
                 }
             }
-        })
+        }
+    }
+}
+
+/// The clocks a frame is judged against: the wall clock for Titan's `timestamp`, and the
+/// timer's clock for every deadline. This is the only place the stream reads a clock; the
+/// tracker only ever sees the values it is handed.
+fn now() -> Now {
+    Now { wall_nanos: wall_clock_nanos(), monotonic: timer_now() }
+}
+
+/// Nanoseconds since the Unix epoch. A system clock unrepresentable as unix nanoseconds yields
+/// 0, which rejects every frame as `in_future`.
+fn wall_clock_nanos() -> u64 {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since_epoch| u64::try_from(since_epoch.as_nanos()).ok());
+    match since_epoch {
+        Some(wall_nanos) => wall_nanos,
+        None => {
+            tracing::error!(
+                "System clock unrepresentable as unix nanoseconds; every price level frame will \
+                 be rejected as in_future"
+            );
+            0
+        }
     }
 }
 
@@ -499,9 +506,7 @@ mod tests {
     #[tokio::test]
     async fn silence_past_stale_after_removes_every_served_component() {
         let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
-        let stream = fast_builder(&fake)
-            .build()
-            .expect("build");
+        let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -526,9 +531,7 @@ mod tests {
             let _ = socket.close(None).await;
         })
         .await;
-        let stream = fast_builder(&fake)
-            .build()
-            .expect("build");
+        let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -548,9 +551,7 @@ mod tests {
                 let _ = socket.close(None).await;
             })
             .await;
-            let stream = fast_builder(&fake)
-                .build()
-                .expect("build");
+            let stream = fast_builder(&fake).build();
             tokio::pin!(stream);
 
             expect_first_update(&mut stream).await;
@@ -577,8 +578,7 @@ mod tests {
                 .await;
         let stream = fast_builder(&fake)
             .read_idle_timeout(Duration::from_secs(5))
-            .build()
-            .expect("build");
+            .build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -606,8 +606,7 @@ mod tests {
         .await;
         let stream = fast_builder(&fake)
             .read_idle_timeout(Duration::from_secs(5))
-            .build()
-            .expect("build");
+            .build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -629,8 +628,7 @@ mod tests {
         let fake = FakeTitan::spawn(fresh_frame_every(Duration::from_millis(50))).await;
         let stream = fast_builder(&fake)
             .stale_after(Duration::from_secs(24))
-            .build()
-            .expect("build");
+            .build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;
@@ -645,9 +643,7 @@ mod tests {
     #[tokio::test]
     async fn no_connection_before_first_poll() {
         let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
-        let stream = fast_builder(&fake)
-            .build()
-            .expect("build");
+        let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -680,8 +676,7 @@ mod tests {
         let mut stream = Box::pin(
             fast_builder(&fake)
                 .read_idle_timeout(Duration::from_secs(5))
-                .build()
-                .expect("build"),
+                .build(),
         );
         expect_first_update(&mut stream.as_mut()).await;
 
@@ -692,25 +687,23 @@ mod tests {
         assert_eq!(fake.connections.load(Ordering::SeqCst), 1, "reconnected after drop");
     }
 
-    #[test]
-    fn stale_after_outside_its_range_fails_to_build() {
-        for given in [Duration::ZERO, MAX_STALE_AFTER + Duration::from_secs(1), Duration::MAX] {
-            let result = PriceLevelStreamBuilder::new()
-                .add_pamm(fermiswap())
-                .with_tokens(tokens())
-                .stale_after(given)
-                .build();
-            match result {
-                Err(PriceLevelStreamBuildError::StaleAfterOutOfRange { given: reported }) => {
-                    assert_eq!(reported, given);
-                }
-                Ok(_) => panic!("built with stale_after {given:?}"),
-            }
-        }
-        assert!(PriceLevelStreamBuilder::new()
-            .stale_after(MAX_STALE_AFTER)
-            .build()
-            .is_ok());
+    /// `Instant + Duration` panics on overflow, so an absurd `stale_after` must be capped before
+    /// the first accepted frame computes a deadline from it.
+    #[tokio::test]
+    async fn stale_after_above_the_cap_still_serves() {
+        assert_eq!(
+            PriceLevelStreamBuilder::new()
+                .stale_after(Duration::MAX)
+                .stale_after,
+            MAX_STALE_AFTER
+        );
+        let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
+        let stream = fast_builder(&fake)
+            .stale_after(Duration::MAX)
+            .build();
+        tokio::pin!(stream);
+
+        expect_first_update(&mut stream).await;
     }
 
     #[tokio::test]
@@ -718,8 +711,7 @@ mod tests {
         let fake = FakeTitan::spawn(first_connection_sends_one_frame).await;
         let stream = fast_builder(&fake)
             .without_quote_guard()
-            .build()
-            .expect("build");
+            .build();
         tokio::pin!(stream);
 
         let first = expect_first_update(&mut stream).await;
@@ -864,9 +856,7 @@ mod tests {
         let fake =
             FakeTitan::spawn(frame_then_repeat(fresh_frame(), filler, Duration::from_millis(10)))
                 .await;
-        let stream = fast_builder(&fake)
-            .build()
-            .expect("build");
+        let stream = fast_builder(&fake).build();
         tokio::pin!(stream);
 
         expect_first_update(&mut stream).await;

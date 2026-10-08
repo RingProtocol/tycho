@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -50,7 +50,8 @@ const MAX_UNREGISTERED_LOGGED: usize = 64;
 /// like unregistered ones.
 const MAX_AUTO_DETECTED: usize = 64;
 
-/// The wall-clock and monotonic time at which the tracker handles a frame.
+/// The wall-clock and monotonic time at which the tracker handles a frame. The tracker never
+/// reads a clock itself: the caller supplies both, so every decision is a function of its inputs.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Now {
     /// Wall clock, nanoseconds since the Unix epoch. Only ever compared against Titan's
@@ -59,29 +60,6 @@ pub(super) struct Now {
     /// Monotonic clock. Every deadline is computed from it, so a wall-clock jump cannot remove a
     /// component early or keep it served late.
     pub monotonic: Instant,
-}
-
-impl Now {
-    /// Reads the wall clock and pairs it with `monotonic`, an instant of the clock the caller's
-    /// deadlines run on. A system clock unrepresentable as unix nanoseconds yields
-    /// `wall_nanos = 0`, which rejects every frame as `in_future`.
-    pub(super) fn at(monotonic: Instant) -> Self {
-        let since_epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|since_epoch| u64::try_from(since_epoch.as_nanos()).ok());
-        let wall_nanos = match since_epoch {
-            Some(wall_nanos) => wall_nanos,
-            None => {
-                tracing::error!(
-                    "System clock unrepresentable as unix nanoseconds; every price level frame \
-                     will be rejected as in_future"
-                );
-                0
-            }
-        };
-        Self { wall_nanos, monotonic }
-    }
 }
 
 /// A component the stream currently serves.

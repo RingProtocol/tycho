@@ -45,9 +45,10 @@ for any protocol indexed by Tycho.
   regresses nor jumps more than one block per elapsed slot plus 2; the block frontier lives in
   `ServingState::Serving`, so it exists only while something is served. The windows and their
   defaults are listed under `# Freshness contract` in `price_level_stream/mod.rs`; every window
-  is a multiple of `SLOT` in `mod.rs`. `build()` returns `Err(PriceLevelStreamBuildError)` for a
-  `stale_after` outside `(0, MAX_STALE_AFTER]`; otherwise it is an `async_stream` loop that
-  selects over frames and a timer set to the earliest component deadline. `titan.rs` reconnects
+  is a multiple of `SLOT` in `mod.rs`; the `stale_after` setter caps its value at
+  `MAX_STALE_AFTER` (one hour). `build()` is an `async_stream` loop that selects over frames and
+  a timer set to the earliest component deadline, and the only place that reads a clock: the
+  tracker gets both clocks injected through `Now`. `titan.rs` reconnects
   when no frame parses within the idle timeout; pings, unparsable text and the consumer's own
   pauses between polls do not count. `telemetry.rs` emits `price_level_stream_*` metrics through
   the `metrics` facade, with label values as enums there and a frame-age histogram at

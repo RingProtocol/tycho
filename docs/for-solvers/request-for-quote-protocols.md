@@ -254,7 +254,7 @@ let price_level_stream = PriceLevelStreamBuilder::new()
     .with_known_pamms()       // serve the venues Tycho has measured
     .auto_detect(true)        // also serve any other venue Titan streams
     .with_tokens(all_tokens.clone())
-    .build()?;                // Err only for a stale_after() out of range
+    .build();
 ```
 
 Quotes target the block currently being built, so the stream marks every update partial and supersedes the previous one for the pairs it contains. Each update carries the block its frame targets; that number only decreases after every component has been removed, when the stream re-anchors on the next frame. The stream never terminates — run it in its own task alongside your protocol stream.
