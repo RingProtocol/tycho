@@ -151,8 +151,7 @@ fn streamed_snapshots<S: WsSource>(
                     Ok(Ok((ws_stream, _))) => Ok(ws_stream),
                     Ok(Err(e)) => Err(FeedError::Connection(format!("connect failed: {e}"))),
                     Err(_) => Err(FeedError::Connection(format!(
-                        "connect timed out after {}s",
-                        connect_timeout.as_secs()
+                        "connect timed out after {connect_timeout:?}"
                     ))),
                 },
             };
@@ -221,8 +220,7 @@ async fn read_next_snapshot<S: WsSource>(
             Ok(None) => return Err(FeedError::Connection("stream ended".to_string())),
             Err(_) => {
                 return Err(FeedError::Connection(format!(
-                    "no frame within the {}s read_idle_timeout",
-                    read_idle_timeout.as_secs()
+                    "no frame within the {read_idle_timeout:?} read_idle_timeout"
                 )))
             }
         };

@@ -171,7 +171,7 @@ fn polled_snapshots<S: HttpSource>(
     // leaves nothing behind for the next one to wait through.
     let mut backoff = None;
 
-    info!(poll_interval_secs = poll_interval.as_secs(), "starting polling");
+    info!(?poll_interval, "starting polling");
 
     try_stream! {
         loop {
@@ -202,10 +202,10 @@ fn polled_snapshots<S: HttpSource>(
                     yield snapshot;
                     continue;
                 }
-                Ok(Err(e)) => if e.is_fatal() { Err(e) } else { Ok(e) }?,
+                Ok(Err(e)) if e.is_fatal() => Err(e)?,
+                Ok(Err(e)) => e,
                 Err(_) => FeedError::Connection(format!(
-                    "poll timed out after {}s",
-                    request_timeout.as_secs()
+                    "poll timed out after {request_timeout:?}"
                 )),
             };
 
