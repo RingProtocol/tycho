@@ -1,3 +1,11 @@
+## [0.445.1](https://github.com/propeller-heads/tycho/compare/0.445.0...0.445.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **indexer:** report the flushed height as the committed height ([4bae66c](https://github.com/propeller-heads/tycho/commit/4bae66cbad9d28002601c13b2d01a096b705be3e))
+* **indexer:** report the flushed height as the committed height ([#1564](https://github.com/propeller-heads/tycho/issues/1564)) ([91319c2](https://github.com/propeller-heads/tycho/commit/91319c219f95ee8acda8df1a7cb455e34dd37dba))
+
 ## [0.445.0](https://github.com/propeller-heads/tycho/compare/0.444.0...0.445.0) (2026-10-07)
 
 
