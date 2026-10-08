@@ -1,3 +1,19 @@
+## [0.448.0](https://github.com/propeller-heads/tycho/compare/0.447.1...0.448.0) (2026-10-08)
+
+
+### Features
+
+* **indexer:** add DeltaWindow block count and tip gauges ([b6195cb](https://github.com/propeller-heads/tycho/commit/b6195cba2c4a5cfd314f38c9afaf3cbc6f03b841))
+* **indexer:** report DeltaWindow gauges after every insert and restart clear ([3725f25](https://github.com/propeller-heads/tycho/commit/3725f25240cc7bf256976810e81beaa6eb4ce98d))
+
+## [0.447.1](https://github.com/propeller-heads/tycho/compare/0.447.0...0.447.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* add missing executors to the router trades table ([821e301](https://github.com/propeller-heads/tycho/commit/821e3010fe404e7acc36b37a4e2699795c9dd6a6))
+* add missing executors to the router trades table ([#1567](https://github.com/propeller-heads/tycho/issues/1567)) ([66b646e](https://github.com/propeller-heads/tycho/commit/66b646e2698f92cfbb761f090a97f07d1a59369b))
+
 ## [0.447.0](https://github.com/propeller-heads/tycho/compare/0.446.0...0.447.0) (2026-10-08)
 
 
