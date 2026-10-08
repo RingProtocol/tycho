@@ -165,10 +165,9 @@ pub enum SnapshotFeedOutcome<E> {
     RanOut,
     /// The feed gave up, and `E` says why.
     Failed(E),
-    /// The task driving the feed panicked: a bug rather than a feed giving up. A [`JoinError`]
-    /// also reports a cancelled task, but the only thing that cancels this one is the consumer's
-    /// own `Drop`, so a reader never sees that.
-    Panicked(JoinError),
+    /// The task driving the feed panicked: a bug rather than a feed giving up. The message
+    /// names the task and what it panicked with, and is for logs — match on the variant.
+    Panicked(String),
 }
 
 impl<E> SnapshotFeedOutcome<E> {
@@ -177,7 +176,7 @@ impl<E> SnapshotFeedOutcome<E> {
         match joined {
             Ok(Ok(())) => SnapshotFeedOutcome::RanOut,
             Ok(Err(error)) => SnapshotFeedOutcome::Failed(error),
-            Err(error) => SnapshotFeedOutcome::Panicked(error),
+            Err(error) => SnapshotFeedOutcome::Panicked(error.to_string()),
         }
     }
 }
