@@ -140,10 +140,7 @@ impl Levels {
 
     /// The ladder's value in output units: the sum of `price * quantity` over every level.
     pub fn notional(&self) -> f64 {
-        self.0
-            .iter()
-            .map(|level| level.price * level.quantity)
-            .sum()
+        self.totals().1
     }
 
     /// Total input the ladder absorbs and the output it pays for it: the two swap limits.

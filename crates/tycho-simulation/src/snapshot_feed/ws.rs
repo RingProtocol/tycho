@@ -150,7 +150,7 @@ fn streamed_snapshots<S: WsSource>(
                     info!("connected");
                     loop {
                         match read_next_snapshot(read_idle_timeout, &mut ws_stream, &mut source).await {
-                            ConnectionRead::Snapshot(snapshot) => {
+                            Ok(snapshot) => {
                                 // A completed handshake says nothing about whether the
                                 // connection works, so only a decoded snapshot clears the counter.
                                 let cleared = failures.record_success();
@@ -159,8 +159,8 @@ fn streamed_snapshots<S: WsSource>(
                                 }
                                 yield snapshot;
                             }
-                            ConnectionRead::Reconnect(reason) => break reason,
-                            ConnectionRead::Fatal(e) => Err(e)?,
+                            Err(e) if e.is_fatal() => Err(e)?,
+                            Err(reason) => break reason,
                         }
                     }
                 }
@@ -192,40 +192,24 @@ fn streamed_snapshots<S: WsSource>(
     }
 }
 
-/// What one read of a WebSocket connection produced, and with it what the caller does next.
-enum ConnectionRead<T> {
-    /// A frame decoded into a complete snapshot: publish it and read on.
-    Snapshot(T),
-    /// This connection will serve no more snapshots — it was closed, went silent, or answered with
-    /// something the source cannot read — so the caller opens another. The reason is carried
-    /// rather than logged, so one warning can report it together with the failure streak it
-    /// belongs to, and so the feed that eventually gives up gives up on this error rather than
-    /// on a retyped copy of its message.
-    Reconnect(FeedError),
-    /// The source reported a failure another connection would answer the same way, so the
-    /// caller gives up.
-    Fatal(FeedError),
-}
-
 /// Reads frames off one WebSocket connection until one decodes into a snapshot, or until the
 /// connection becomes unusable. Frames that carry no snapshot are read past.
+///
+/// `Err` carries why this connection served no snapshot, for the caller to report with the
+/// failure streak it belongs to and to classify with [`FeedError::is_fatal`].
 async fn read_next_snapshot<S: WsSource>(
     read_idle_timeout: Duration,
     ws_stream: &mut (impl Stream<Item = Result<Message, tungstenite::Error>> + Unpin),
     source: &mut S,
-) -> ConnectionRead<S::Snapshot> {
+) -> Result<S::Snapshot, FeedError> {
     loop {
         let received = timeout(read_idle_timeout, ws_stream.next()).await;
         let message = match received {
             Ok(Some(Ok(message))) => message,
-            Ok(Some(Err(e))) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(format!("read failed: {e}")))
-            }
-            Ok(None) => {
-                return ConnectionRead::Reconnect(FeedError::Connection("stream ended".to_string()))
-            }
+            Ok(Some(Err(e))) => return Err(FeedError::Connection(format!("read failed: {e}"))),
+            Ok(None) => return Err(FeedError::Connection("stream ended".to_string())),
             Err(_) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(format!(
+                return Err(FeedError::Connection(format!(
                     "no frame within the {}s read_idle_timeout",
                     read_idle_timeout.as_secs()
                 )))
@@ -239,12 +223,10 @@ async fn read_next_snapshot<S: WsSource>(
             // reaction.
             Message::Ping(_) | Message::Pong(_) => continue,
             Message::Close(Some(frame)) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(format!(
-                    "closed by server: {frame}"
-                )))
+                return Err(FeedError::Connection(format!("closed by server: {frame}")))
             }
             Message::Close(None) => {
-                return ConnectionRead::Reconnect(FeedError::Connection(
+                return Err(FeedError::Connection(
                     "closed by server without a close frame".to_string(),
                 ))
             }
@@ -259,14 +241,9 @@ async fn read_next_snapshot<S: WsSource>(
         let decoded = debug_span!("ws_frame").in_scope(|| source.decode(payload));
         return match decoded {
             Ok(None) => continue,
-            Ok(Some(snapshot)) => ConnectionRead::Snapshot(snapshot),
-            Err(e) => {
-                if e.is_fatal() {
-                    ConnectionRead::Fatal(e)
-                } else {
-                    ConnectionRead::Reconnect(e.in_context("decode failed"))
-                }
-            }
+            Ok(Some(snapshot)) => Ok(snapshot),
+            Err(e) if e.is_fatal() => Err(e),
+            Err(e) => Err(e.in_context("decode failed")),
         }
     }
 }
@@ -693,7 +670,7 @@ mod tests {
 
         assert_eq!(start.elapsed(), give_up_at);
         match read {
-            ConnectionRead::Reconnect(FeedError::Connection(reason)) => {
+            Err(FeedError::Connection(reason)) => {
                 assert_eq!(reason, "no frame within the 60s read_idle_timeout")
             }
             _ => panic!("a silent connection must be given up on, not read further"),
