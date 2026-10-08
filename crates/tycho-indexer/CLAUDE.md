@@ -42,6 +42,7 @@ extractor/
 services/
   mod.rs                    ServicesBuilder — wires extractors, gateway, and server together
   rpc.rs                    HTTP endpoints: state snapshots, component queries
+  off_worker.rs             OffWorker — builds and serializes large state responses on the blocking pool, bounded per step
   ws.rs                     WebSocket broadcaster — emits BlockAggregatedChanges per block
   deltas_buffer.rs          PendingDeltas — facade over one DeltaWindow per extractor
   state/

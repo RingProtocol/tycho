@@ -2,19 +2,13 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Instant,
 };
 
-use actix_web::{
-    http::{header::ContentType, StatusCode},
-    web, HttpResponse, ResponseError,
-};
+use actix_web::{http::StatusCode, web, HttpResponse, ResponseError};
 use anyhow::Error;
 use chrono::{Duration, Utc};
 use diesel_async::pooled_connection::deadpool;
-use serde::Serialize;
 use thiserror::Error;
-use tokio::sync::Semaphore;
 use tracing::{debug, error, info, instrument, trace, warn};
 use tycho_common::{
     dto::{self, PaginationResponse},
@@ -39,6 +33,7 @@ use crate::{
         middleware::{
             PlanRestrictions, PlansConfig, RequestPaginationValidation, ValidateRestrictions,
         },
+        off_worker::OffWorker,
         state::service::{EntityCacheSetup, FallbackReason, StateService, StateServiceError},
     },
 };
@@ -122,11 +117,8 @@ pub struct RpcHandler<G, T> {
     protocol_systems: Vec<String>,
     /// Which path answers state requests. `Off` without extractors.
     state_service: EntityCacheSetup<Arc<StateService>>,
-    /// Bounds the state responses built at once, see [`run_off_worker`].
-    build_pool: OffWorkerPool,
-    /// Bounds the state responses serialized at once. Separate from `build_pool`, so a built
-    /// response does not wait behind builds that queued after it.
-    serialize_pool: OffWorkerPool,
+    /// Builds and serializes large state responses off the request workers.
+    off_worker: OffWorker,
 }
 
 impl<G, T> RpcHandler<G, T>
@@ -181,8 +173,7 @@ where
             dci_protocols,
             protocol_systems,
             state_service: EntityCacheSetup::Off,
-            build_pool: OffWorkerPool::new("build", request_worker_count()),
-            serialize_pool: OffWorkerPool::new("serialize", request_worker_count()),
+            off_worker: OffWorker::new(),
         }
     }
 
@@ -205,6 +196,37 @@ where
             // TODO(ENG-6295): in `shadow`, run the cache path on a sample of requests and compare
             // it with the database answer.
             EntityCacheSetup::Shadow(_) | EntityCacheSetup::Off => None,
+        }
+    }
+
+    /// The entity cache's answer to `request`, built off the request worker. `None` when the
+    /// cache does not serve, or hands the request to the database path; a hand-off is counted in
+    /// `db_path_requests`.
+    async fn cache_answer<Req, Resp>(
+        &self,
+        endpoint: &'static str,
+        request: &Req,
+        answer: fn(&StateService, &Req) -> Result<Resp, StateServiceError>,
+    ) -> Result<Option<Resp>, RpcError>
+    where
+        Req: Clone + Send + 'static,
+        Resp: Send + 'static,
+    {
+        let Some(service) = self.serving_state_service() else {
+            return Ok(None);
+        };
+        let request = request.clone();
+        match self
+            .off_worker
+            .build(move || answer(&service, &request))
+            .await?
+        {
+            Ok(response) => Ok(Some(response)),
+            Err(StateServiceError::Fallback(reason)) => {
+                count_db_path(endpoint, reason);
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -297,16 +319,11 @@ where
         &self,
         request: dto::StateRequestBody,
     ) -> Result<dto::StateRequestResponse, RpcError> {
-        if let Some(service) = self.serving_state_service() {
-            let cache_request = request.clone();
-            let result =
-                run_off_worker(&self.build_pool, move || service.contract_state(&cache_request))
-                    .await?;
-            match result {
-                Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => count_db_path("contract_state", reason),
-                Err(err) => return Err(err.into()),
-            }
+        if let Some(response) = self
+            .cache_answer("contract_state", &request, StateService::contract_state)
+            .await?
+        {
+            return Ok(response);
         }
         self.get_contract_state_inner(request)
             .await
@@ -542,16 +559,11 @@ where
         &self,
         request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
-        if let Some(service) = self.serving_state_service() {
-            let cache_request = request.clone();
-            let result =
-                run_off_worker(&self.build_pool, move || service.protocol_state(&cache_request))
-                    .await?;
-            match result {
-                Ok(response) => return Ok(response),
-                Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
-                Err(err) => return Err(err.into()),
-            }
+        if let Some(response) = self
+            .cache_answer("protocol_state", &request, StateService::protocol_state)
+            .await?
+        {
+            return Ok(response);
         }
         self.get_protocol_state_inner(request)
             .await
@@ -1177,139 +1189,6 @@ impl From<StateServiceError> for RpcError {
     }
 }
 
-/// Number of actix request workers: actix starts one per available CPU unless configured.
-fn request_worker_count() -> usize {
-    std::thread::available_parallelism().map_or(1, usize::from)
-}
-
-/// A bounded share of the blocking thread pool: at most `size` jobs of [`run_off_worker`] run in
-/// it at once.
-struct OffWorkerPool {
-    /// The `pool` label of the `off_worker_permit_wait_ms` histogram.
-    name: &'static str,
-    permits: Arc<Semaphore>,
-}
-
-impl OffWorkerPool {
-    fn new(name: &'static str, size: usize) -> Self {
-        Self { name, permits: Arc::new(Semaphore::new(size)) }
-    }
-}
-
-/// Runs `work` on the blocking thread pool, in `pool`, and waits for its result.
-///
-/// A request worker serves all requests on its connections from one thread, so CPU-heavy work
-/// that runs on it delays every other request it serves. Building or serializing a large state
-/// response can take seconds; running it here keeps the worker free. At most the pool's size of
-/// jobs run at once, which bounds the CPU and memory these jobs use. A job keeps its permit until
-/// `work` returns, also when the caller stops waiting. The wait for a permit is recorded in
-/// `off_worker_permit_wait_ms`. `work` runs in the caller's tracing span.
-///
-/// # Errors
-///
-/// Returns [`RpcError::Unknown`] if the pool is closed or `work` panics.
-async fn run_off_worker<R, F>(pool: &OffWorkerPool, work: F) -> Result<R, RpcError>
-where
-    R: Send + 'static,
-    F: FnOnce() -> R + Send + 'static,
-{
-    let wait_started = Instant::now();
-    let permit = Arc::clone(&pool.permits)
-        .acquire_owned()
-        .await
-        .map_err(|err| RpcError::Unknown(format!("Off-worker permits closed: {err}")))?;
-    metrics::histogram!("off_worker_permit_wait_ms", "pool" => pool.name)
-        .record(wait_started.elapsed().as_secs_f64() * 1000.0);
-    let span = tracing::Span::current();
-    tokio::task::spawn_blocking(move || {
-        let result = span.in_scope(work);
-        drop(permit);
-        result
-    })
-    .await
-    .map_err(|err| RpcError::Unknown(format!("Off-worker task failed: {err}")))
-}
-
-/// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
-/// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
-/// worker; the hop to the blocking thread pool costs about 30 µs.
-const OFF_WORKER_MIN_JSON_BYTES: usize = 256 * 1024;
-
-/// JSON bytes of one storage slot or token balance: two hex strings of up to 32 bytes.
-const JSON_BYTES_PER_SLOT: usize = 140;
-/// JSON bytes of one protocol attribute or component balance: a short name or a token address,
-/// and a short hex value.
-const JSON_BYTES_PER_ATTRIBUTE: usize = 48;
-/// JSON bytes of the fixed fields of one account, without its code.
-const JSON_BYTES_PER_ACCOUNT: usize = 512;
-/// JSON bytes of the fixed fields of one component state.
-const JSON_BYTES_PER_COMPONENT: usize = 100;
-
-/// An estimate of the JSON size of a response. Reads map and field lengths only, never map
-/// entries, so it costs a few nanoseconds per account or component, however large their maps.
-trait JsonSizeHint {
-    fn json_size_hint(&self) -> usize;
-}
-
-impl JsonSizeHint for dto::StateRequestResponse {
-    fn json_size_hint(&self) -> usize {
-        let mut size = 0;
-        for account in &self.accounts {
-            size += (account.slots.len() + account.token_balances.len()) * JSON_BYTES_PER_SLOT;
-            // Code is a hex string: two characters per byte.
-            size += 2 * account.code.len() + JSON_BYTES_PER_ACCOUNT;
-        }
-        size
-    }
-}
-
-impl JsonSizeHint for dto::ProtocolStateRequestResponse {
-    fn json_size_hint(&self) -> usize {
-        let mut size = 0;
-        for state in &self.states {
-            size += (state.attributes.len() + state.balances.len()) * JSON_BYTES_PER_ATTRIBUTE;
-            size += JSON_BYTES_PER_COMPONENT;
-        }
-        size
-    }
-}
-
-/// Answers `value` as the JSON body of a `200 OK` response. A response estimated at
-/// [`OFF_WORKER_MIN_JSON_BYTES`] or more is serialized in `pool`, see [`json_off_worker`]; a
-/// smaller one on the request worker.
-///
-/// # Errors
-///
-/// Returns [`RpcError::Unknown`] if [`json_off_worker`] fails.
-async fn json_response<V>(pool: &OffWorkerPool, value: Arc<V>) -> Result<HttpResponse, RpcError>
-where
-    V: Serialize + JsonSizeHint + Send + Sync + 'static,
-{
-    if value.json_size_hint() < OFF_WORKER_MIN_JSON_BYTES {
-        return Ok(HttpResponse::Ok().json(value));
-    }
-    json_off_worker(pool, value).await
-}
-
-/// Serializes `value` as the JSON body of a `200 OK` response, off the request worker.
-///
-/// The response matches [`HttpResponse::json`]: same body and `Content-Type: application/json`.
-///
-/// # Errors
-///
-/// Returns [`RpcError::Unknown`] if serialization fails or [`run_off_worker`] fails.
-async fn json_off_worker<V>(pool: &OffWorkerPool, value: Arc<V>) -> Result<HttpResponse, RpcError>
-where
-    V: Serialize + Send + Sync + 'static,
-{
-    let body = run_off_worker(pool, move || serde_json::to_vec(value.as_ref()))
-        .await?
-        .map_err(|err| RpcError::Unknown(format!("Failed to serialize response: {err}")))?;
-    Ok(HttpResponse::Ok()
-        .content_type(ContentType::json())
-        .body(body))
-}
-
 /// Counts a state request the entity cache handed to the database path.
 fn count_db_path(endpoint: &'static str, reason: FallbackReason) {
     metrics::counter!("db_path_requests", "endpoint" => endpoint, "reason" => reason.as_str())
@@ -1374,7 +1253,7 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_contract_state(&body).await;
 
     match response {
-        Ok(state) => json_response(&handler.serialize_pool, state).await,
+        Ok(state) => handler.off_worker.json(state).await,
         Err(err) => {
             error!(error = %err, ?body, "Error while getting contract state.");
             Err(err)
@@ -1511,7 +1390,7 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_protocol_state(&body).await;
 
     match response {
-        Ok(state) => json_response(&handler.serialize_pool, state).await,
+        Ok(state) => handler.off_worker.json(state).await,
         Err(err) => {
             error!(error = %err, ?body, "Error while getting protocol states.");
             Err(err)
@@ -3813,216 +3692,5 @@ plans:
         } else {
             assert_eq!(resp.status(), actix_web::http::StatusCode::BAD_REQUEST);
         }
-    }
-
-    /// Waits until `pool` has `n` permits available, and fails after one second.
-    async fn wait_for_available_permits(pool: &OffWorkerPool, n: usize) {
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while pool.permits.available_permits() != n {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("permits were not released");
-    }
-
-    // `tokio::test` runs on one thread. Work that ran on it would block the release below until
-    // `recv_timeout` gives up.
-    #[tokio::test]
-    async fn run_off_worker_keeps_the_runtime_free_while_the_work_blocks() {
-        let pool = OffWorkerPool::new("test", 1);
-        let (release, released) = std::sync::mpsc::channel::<()>();
-
-        let job = run_off_worker(&pool, move || {
-            released
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .is_ok()
-        });
-        let release = async move { release.send(()).unwrap() };
-        let (released_in_time, ()) = tokio::join!(job, release);
-
-        assert!(released_in_time.unwrap());
-    }
-
-    #[tokio::test]
-    async fn run_off_worker_keeps_the_permit_until_the_work_returns() {
-        let pool = OffWorkerPool::new("test", 1);
-        let (release, released) = std::sync::mpsc::channel::<()>();
-
-        // Stop waiting while the work still runs, as the handler does when it is dropped.
-        let gave_up = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            run_off_worker(&pool, move || {
-                released
-                    .recv_timeout(std::time::Duration::from_secs(2))
-                    .ok();
-            }),
-        )
-        .await;
-
-        assert!(gave_up.is_err());
-        assert_eq!(pool.permits.available_permits(), 0);
-        release.send(()).unwrap();
-        wait_for_available_permits(&pool, 1).await;
-    }
-
-    #[tokio::test]
-    async fn run_off_worker_runs_no_more_jobs_than_permits() {
-        let pool = Arc::new(OffWorkerPool::new("test", 1));
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let first = tokio::spawn({
-            let pool = Arc::clone(&pool);
-            async move {
-                run_off_worker(&pool, move || {
-                    released
-                        .recv_timeout(std::time::Duration::from_secs(2))
-                        .ok();
-                })
-                .await
-            }
-        });
-        wait_for_available_permits(&pool, 0).await;
-
-        let second_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let second = tokio::spawn({
-            let pool = Arc::clone(&pool);
-            let started = Arc::clone(&second_started);
-            async move {
-                run_off_worker(&pool, move || {
-                    started.store(true, std::sync::atomic::Ordering::SeqCst)
-                })
-                .await
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        assert!(!second_started.load(std::sync::atomic::Ordering::SeqCst));
-        release.send(()).unwrap();
-        first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
-        assert!(second_started.load(std::sync::atomic::Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn run_off_worker_reports_a_panicking_job_and_frees_its_permit() {
-        let pool = OffWorkerPool::new("test", 1);
-
-        let result = run_off_worker(&pool, || -> () { panic!("job failed") }).await;
-
-        assert!(matches!(result, Err(RpcError::Unknown(_))));
-        wait_for_available_permits(&pool, 1).await;
-    }
-
-    #[actix_web::test]
-    async fn json_off_worker_answers_like_http_response_json() {
-        let value = Arc::new(serde_json::json!({
-            "accounts": [{"address": "0x01", "slots": {"0x02": "0x03", "0x04": "0x"}}],
-            "pagination": {"page": 0, "page_size": 10, "total": 1}
-        }));
-        let expected = HttpResponse::Ok().json(Arc::clone(&value));
-
-        let actual = json_off_worker(&OffWorkerPool::new("test", 1), value)
-            .await
-            .unwrap();
-
-        assert_eq!(actual.status(), expected.status());
-        let content_type = actix_web::http::header::CONTENT_TYPE;
-        assert_eq!(actual.headers().get(&content_type), expected.headers().get(&content_type));
-        let actual_body = actix_web::body::to_bytes(actual.into_body())
-            .await
-            .unwrap();
-        let expected_body = actix_web::body::to_bytes(expected.into_body())
-            .await
-            .unwrap();
-        assert_eq!(actual_body, expected_body);
-    }
-
-    /// A 32-byte value, like a storage slot key or value.
-    fn word(seed: u64) -> Bytes {
-        let mut word = [0u8; 32];
-        word[24..].copy_from_slice(&seed.to_be_bytes());
-        Bytes::from(word)
-    }
-
-    /// A contract state response with one account, `n_slots` storage slots and `code_len` bytes
-    /// of code.
-    fn contract_state_response(n_slots: usize, code_len: usize) -> Arc<dto::StateRequestResponse> {
-        let slots = (0..n_slots as u64)
-            .map(|slot| (word(slot), word(u64::MAX - slot)))
-            .collect();
-        let account = dto::ResponseAccount {
-            slots,
-            code: Bytes::from(vec![0x60; code_len]),
-            ..Default::default()
-        };
-        Arc::new(dto::StateRequestResponse::new(vec![account], PaginationResponse::new(0, 10, 1)))
-    }
-
-    /// A protocol state response with `n_components` components of `n_attributes` tick
-    /// attributes each. Tick values are short integers, as on uniswap v3 and v4 pools.
-    fn protocol_state_response(
-        n_components: usize,
-        n_attributes: usize,
-    ) -> dto::ProtocolStateRequestResponse {
-        let states = (0..n_components)
-            .map(|component| {
-                let attributes = (0..n_attributes as i64)
-                    .map(|tick| {
-                        let liquidity = Bytes::from(1_000_000_007 * tick as u64);
-                        (format!("ticks/{}/net-liquidity", tick * 60 - 887_220), liquidity)
-                    })
-                    .collect();
-                dto::ResponseProtocolState {
-                    component_id: format!("0x{component:040x}"),
-                    attributes,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        dto::ProtocolStateRequestResponse::new(states, PaginationResponse::new(0, 10, 1))
-    }
-
-    #[test]
-    async fn json_size_hint_is_close_to_the_serialized_size() {
-        let contract = contract_state_response(1_000, 24_000);
-        let protocol = protocol_state_response(10, 200);
-
-        for (hint, actual) in [
-            (
-                contract.json_size_hint(),
-                serde_json::to_vec(contract.as_ref())
-                    .unwrap()
-                    .len(),
-            ),
-            (
-                protocol.json_size_hint(),
-                serde_json::to_vec(&protocol)
-                    .unwrap()
-                    .len(),
-            ),
-        ] {
-            let ratio = hint as f64 / actual as f64;
-            assert!((0.8..1.25).contains(&ratio), "hint {hint} for {actual} bytes");
-        }
-    }
-
-    // The pool has no permits, so only a response serialized on the worker can return.
-    #[actix_web::test]
-    async fn json_response_serializes_only_large_responses_off_the_worker() {
-        let pool = OffWorkerPool::new("test", 0);
-        let slots_at_threshold =
-            (OFF_WORKER_MIN_JSON_BYTES - JSON_BYTES_PER_ACCOUNT).div_ceil(JSON_BYTES_PER_SLOT);
-        let below = contract_state_response(slots_at_threshold - 1, 0);
-        let at = contract_state_response(slots_at_threshold, 0);
-        assert!(below.json_size_hint() < OFF_WORKER_MIN_JSON_BYTES);
-        assert!(at.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
-
-        let wait = std::time::Duration::from_millis(50);
-        let small = tokio::time::timeout(wait, json_response(&pool, below)).await;
-        let large = tokio::time::timeout(wait, json_response(&pool, at)).await;
-
-        let small = small.expect("a response below the threshold must not wait for a permit");
-        assert_eq!(small.unwrap().status(), StatusCode::OK);
-        assert!(large.is_err(), "a response at the threshold must wait for a permit");
     }
 }

@@ -41,6 +41,7 @@ mod client_metadata;
 mod debug;
 mod deltas_buffer;
 mod middleware;
+mod off_worker;
 mod rpc;
 mod state;
 mod ws;
