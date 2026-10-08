@@ -542,11 +542,12 @@ where
         &self,
         request: dto::ProtocolStateRequestBody,
     ) -> Result<dto::ProtocolStateRequestResponse, RpcError> {
-        // Built on the worker: a component holds few attributes, unlike an account that can hold
-        // millions of slots. A large response is still serialized off the worker, see
-        // `json_response`.
         if let Some(service) = self.serving_state_service() {
-            match service.protocol_state(&request) {
+            let cache_request = request.clone();
+            let result =
+                run_off_worker(&self.build_pool, move || service.protocol_state(&cache_request))
+                    .await?;
+            match result {
                 Ok(response) => return Ok(response),
                 Err(StateServiceError::Fallback(reason)) => count_db_path("protocol_state", reason),
                 Err(err) => return Err(err.into()),
@@ -1229,50 +1230,62 @@ where
     .map_err(|err| RpcError::Unknown(format!("Off-worker task failed: {err}")))
 }
 
-/// Responses with fewer map entries than this are serialized on the request worker, in about a
-/// millisecond or less. They do not pay the hop to the blocking thread pool and do not wait for a
-/// permit behind large responses.
-const OFF_WORKER_MIN_ENTRIES: usize = 10_000;
+/// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
+/// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
+/// worker; the hop to the blocking thread pool costs about 30 µs.
+const OFF_WORKER_MIN_JSON_BYTES: usize = 256 * 1024;
 
-/// The number of map entries in a response, an estimate of the cost to serialize it.
-trait EntryCount {
-    fn entry_count(&self) -> usize;
+/// JSON bytes of one storage slot or token balance: two hex strings of up to 32 bytes.
+const JSON_BYTES_PER_SLOT: usize = 140;
+/// JSON bytes of one protocol attribute or component balance: a short name or a token address,
+/// and a short hex value.
+const JSON_BYTES_PER_ATTRIBUTE: usize = 48;
+/// JSON bytes of the fixed fields of one account, without its code.
+const JSON_BYTES_PER_ACCOUNT: usize = 512;
+/// JSON bytes of the fixed fields of one component state.
+const JSON_BYTES_PER_COMPONENT: usize = 100;
+
+/// An estimate of the JSON size of a response. Reads map and field lengths only, never map
+/// entries, so it costs a few nanoseconds per account or component, however large their maps.
+trait JsonSizeHint {
+    fn json_size_hint(&self) -> usize;
 }
 
-impl EntryCount for dto::StateRequestResponse {
-    /// Counts the storage slots and token balances of each account, plus one per account.
-    fn entry_count(&self) -> usize {
-        let mut count = 0;
+impl JsonSizeHint for dto::StateRequestResponse {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
         for account in &self.accounts {
-            count += account.slots.len() + account.token_balances.len() + 1;
+            size += (account.slots.len() + account.token_balances.len()) * JSON_BYTES_PER_SLOT;
+            // Code is a hex string: two characters per byte.
+            size += 2 * account.code.len() + JSON_BYTES_PER_ACCOUNT;
         }
-        count
+        size
     }
 }
 
-impl EntryCount for dto::ProtocolStateRequestResponse {
-    /// Counts the attributes and balances of each component, plus one per component.
-    fn entry_count(&self) -> usize {
-        let mut count = 0;
+impl JsonSizeHint for dto::ProtocolStateRequestResponse {
+    fn json_size_hint(&self) -> usize {
+        let mut size = 0;
         for state in &self.states {
-            count += state.attributes.len() + state.balances.len() + 1;
+            size += (state.attributes.len() + state.balances.len()) * JSON_BYTES_PER_ATTRIBUTE;
+            size += JSON_BYTES_PER_COMPONENT;
         }
-        count
+        size
     }
 }
 
-/// Answers `value` as the JSON body of a `200 OK` response. A response with
-/// [`OFF_WORKER_MIN_ENTRIES`] or more entries is serialized in `pool`, see [`json_off_worker`];
-/// a smaller one on the request worker.
+/// Answers `value` as the JSON body of a `200 OK` response. A response estimated at
+/// [`OFF_WORKER_MIN_JSON_BYTES`] or more is serialized in `pool`, see [`json_off_worker`]; a
+/// smaller one on the request worker.
 ///
 /// # Errors
 ///
 /// Returns [`RpcError::Unknown`] if [`json_off_worker`] fails.
 async fn json_response<V>(pool: &OffWorkerPool, value: Arc<V>) -> Result<HttpResponse, RpcError>
 where
-    V: Serialize + EntryCount + Send + Sync + 'static,
+    V: Serialize + JsonSizeHint + Send + Sync + 'static,
 {
-    if value.entry_count() < OFF_WORKER_MIN_ENTRIES {
+    if value.json_size_hint() < OFF_WORKER_MIN_JSON_BYTES {
         return Ok(HttpResponse::Ok().json(value));
     }
     json_off_worker(pool, value).await
@@ -3924,22 +3937,85 @@ plans:
         assert_eq!(actual_body, expected_body);
     }
 
-    /// A contract state response with one account and `n_slots` storage slots: `n_slots + 1`
-    /// entries.
-    fn contract_state_response(n_slots: usize) -> Arc<dto::StateRequestResponse> {
-        let slots = (0..n_slots)
-            .map(|slot| (Bytes::from(slot as u64), Bytes::from(1u64)))
+    /// A 32-byte value, like a storage slot key or value.
+    fn word(seed: u64) -> Bytes {
+        let mut word = [0u8; 32];
+        word[24..].copy_from_slice(&seed.to_be_bytes());
+        Bytes::from(word)
+    }
+
+    /// A contract state response with one account, `n_slots` storage slots and `code_len` bytes
+    /// of code.
+    fn contract_state_response(n_slots: usize, code_len: usize) -> Arc<dto::StateRequestResponse> {
+        let slots = (0..n_slots as u64)
+            .map(|slot| (word(slot), word(u64::MAX - slot)))
             .collect();
-        let account = dto::ResponseAccount { slots, ..Default::default() };
+        let account = dto::ResponseAccount {
+            slots,
+            code: Bytes::from(vec![0x60; code_len]),
+            ..Default::default()
+        };
         Arc::new(dto::StateRequestResponse::new(vec![account], PaginationResponse::new(0, 10, 1)))
+    }
+
+    /// A protocol state response with `n_components` components of `n_attributes` tick
+    /// attributes each. Tick values are short integers, as on uniswap v3 and v4 pools.
+    fn protocol_state_response(
+        n_components: usize,
+        n_attributes: usize,
+    ) -> dto::ProtocolStateRequestResponse {
+        let states = (0..n_components)
+            .map(|component| {
+                let attributes = (0..n_attributes as i64)
+                    .map(|tick| {
+                        let liquidity = Bytes::from(1_000_000_007 * tick as u64);
+                        (format!("ticks/{}/net-liquidity", tick * 60 - 887_220), liquidity)
+                    })
+                    .collect();
+                dto::ResponseProtocolState {
+                    component_id: format!("0x{component:040x}"),
+                    attributes,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        dto::ProtocolStateRequestResponse::new(states, PaginationResponse::new(0, 10, 1))
+    }
+
+    #[test]
+    async fn json_size_hint_is_close_to_the_serialized_size() {
+        let contract = contract_state_response(1_000, 24_000);
+        let protocol = protocol_state_response(10, 200);
+
+        for (hint, actual) in [
+            (
+                contract.json_size_hint(),
+                serde_json::to_vec(contract.as_ref())
+                    .unwrap()
+                    .len(),
+            ),
+            (
+                protocol.json_size_hint(),
+                serde_json::to_vec(&protocol)
+                    .unwrap()
+                    .len(),
+            ),
+        ] {
+            let ratio = hint as f64 / actual as f64;
+            assert!((0.8..1.25).contains(&ratio), "hint {hint} for {actual} bytes");
+        }
     }
 
     // The pool has no permits, so only a response serialized on the worker can return.
     #[actix_web::test]
     async fn json_response_serializes_only_large_responses_off_the_worker() {
         let pool = OffWorkerPool::new("test", 0);
-        let below = contract_state_response(OFF_WORKER_MIN_ENTRIES - 2);
-        let at = contract_state_response(OFF_WORKER_MIN_ENTRIES - 1);
+        let slots_at_threshold =
+            (OFF_WORKER_MIN_JSON_BYTES - JSON_BYTES_PER_ACCOUNT).div_ceil(JSON_BYTES_PER_SLOT);
+        let below = contract_state_response(slots_at_threshold - 1, 0);
+        let at = contract_state_response(slots_at_threshold, 0);
+        assert!(below.json_size_hint() < OFF_WORKER_MIN_JSON_BYTES);
+        assert!(at.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
 
         let wait = std::time::Duration::from_millis(50);
         let small = tokio::time::timeout(wait, json_response(&pool, below)).await;
