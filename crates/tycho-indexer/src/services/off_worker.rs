@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tycho_common::dto;
 
-use crate::services::rpc::RpcError;
+use crate::services::{rpc::RpcError, state::shadow::Endpoint};
 
 /// Responses whose JSON is estimated below this many bytes are serialized on the request worker.
 /// Serialization costs about 1.5 ns per output byte, so this is at most about 0.4 ms on the
@@ -27,48 +27,60 @@ const JSON_BYTES_PER_ACCOUNT: usize = 512;
 /// JSON bytes of the fixed fields of one component state.
 const JSON_BYTES_PER_COMPONENT: usize = 100;
 
-/// Runs the CPU-heavy steps of state responses off the actix request workers. Each step (build,
-/// serialize) runs at most one job per request worker at once, so a built response never waits
-/// behind builds that queued after it.
+/// Runs the CPU-heavy steps of state responses off the actix request workers. Each endpoint and
+/// step (build, serialize) has its own pool of one permit per request worker, so a job never
+/// waits behind jobs of another endpoint or step: a protocol state response, built in
+/// milliseconds, does not queue behind contract state builds that take seconds, and a built
+/// response does not queue behind builds that started after it.
 pub(super) struct OffWorker {
-    build_pool: Pool,
-    serialize_pool: Pool,
+    contract_state: EndpointPools,
+    protocol_state: EndpointPools,
 }
 
 impl OffWorker {
-    /// One permit per request worker for each step; actix starts one worker per available CPU.
+    /// One permit per request worker for each endpoint and step; actix starts one worker per
+    /// available CPU.
     pub(super) fn new() -> Self {
         let workers = std::thread::available_parallelism().map_or(1, usize::from);
         Self {
-            build_pool: Pool::new("build", workers),
-            serialize_pool: Pool::new("serialize", workers),
+            contract_state: EndpointPools::new(Endpoint::ContractState, workers),
+            protocol_state: EndpointPools::new(Endpoint::ProtocolState, workers),
         }
     }
 
-    /// Runs `build` on the blocking thread pool, in the caller's tracing span, and returns its
-    /// result. The job keeps its permit until `build` returns, also when the caller stops waiting.
+    /// Runs `build` for `endpoint` on the blocking thread pool, in the caller's tracing span, and
+    /// returns its result. The job keeps its permit until `build` returns, also when the caller
+    /// stops waiting.
     ///
     /// # Errors
     ///
     /// Returns [`RpcError::Unknown`] if `build` panics.
     pub(super) async fn build<R>(
         &self,
+        endpoint: Endpoint,
         build: impl FnOnce() -> R + Send + 'static,
     ) -> Result<R, RpcError>
     where
         R: Send + 'static,
     {
-        self.build_pool.run(build).await
+        self.pools(endpoint)
+            .build
+            .run(build)
+            .await
     }
 
-    /// Answers `value` as a `200 OK` JSON response, the same as [`HttpResponse::json`]. A response
-    /// estimated at [`OFF_WORKER_MIN_JSON_BYTES`] or more is serialized on the blocking thread
-    /// pool; a smaller one on the request worker.
+    /// Answers `value`, a response of `endpoint`, as a `200 OK` JSON response, the same as
+    /// [`HttpResponse::json`]. A response estimated at [`OFF_WORKER_MIN_JSON_BYTES`] or more is
+    /// serialized on the blocking thread pool; a smaller one on the request worker.
     ///
     /// # Errors
     ///
     /// Returns [`RpcError::Unknown`] if serialization fails or panics.
-    pub(super) async fn json<V>(&self, value: Arc<V>) -> Result<HttpResponse, RpcError>
+    pub(super) async fn json<V>(
+        &self,
+        endpoint: Endpoint,
+        value: Arc<V>,
+    ) -> Result<HttpResponse, RpcError>
     where
         V: Serialize + JsonSizeHint + Send + Sync + 'static,
     {
@@ -76,7 +88,8 @@ impl OffWorker {
             return Ok(HttpResponse::Ok().json(value));
         }
         let body = self
-            .serialize_pool
+            .pools(endpoint)
+            .serialize
             .run(move || serde_json::to_vec(value.as_ref()))
             .await?
             .map_err(|err| RpcError::Unknown(format!("Failed to serialize response: {err}")))?;
@@ -84,18 +97,41 @@ impl OffWorker {
             .content_type(ContentType::json())
             .body(body))
     }
+
+    fn pools(&self, endpoint: Endpoint) -> &EndpointPools {
+        match endpoint {
+            Endpoint::ContractState => &self.contract_state,
+            Endpoint::ProtocolState => &self.protocol_state,
+        }
+    }
+}
+
+/// The pools of one endpoint, one per step.
+struct EndpointPools {
+    build: Pool,
+    serialize: Pool,
+}
+
+impl EndpointPools {
+    fn new(endpoint: Endpoint, size: usize) -> Self {
+        Self {
+            build: Pool::new(endpoint, "build", size),
+            serialize: Pool::new(endpoint, "serialize", size),
+        }
+    }
 }
 
 /// A bounded share of the blocking thread pool.
 struct Pool {
-    /// The `pool` label of the `off_worker_permit_wait_ms` histogram.
-    name: &'static str,
+    /// The `endpoint` and `step` labels of the `off_worker_permit_wait_ms` histogram.
+    endpoint: Endpoint,
+    step: &'static str,
     permits: Arc<Semaphore>,
 }
 
 impl Pool {
-    fn new(name: &'static str, size: usize) -> Self {
-        Self { name, permits: Arc::new(Semaphore::new(size)) }
+    fn new(endpoint: Endpoint, step: &'static str, size: usize) -> Self {
+        Self { endpoint, step, permits: Arc::new(Semaphore::new(size)) }
     }
 
     /// Runs `work` on the blocking thread pool, in the caller's tracing span, once a permit is
@@ -114,8 +150,12 @@ impl Pool {
             .acquire_owned()
             .await
             .map_err(|err| RpcError::Unknown(format!("Off-worker permits closed: {err}")))?;
-        metrics::histogram!("off_worker_permit_wait_ms", "pool" => self.name)
-            .record(wait_started.elapsed().as_secs_f64() * 1000.0);
+        metrics::histogram!(
+            "off_worker_permit_wait_ms",
+            "endpoint" => self.endpoint.label(),
+            "step" => self.step
+        )
+        .record(wait_started.elapsed().as_secs_f64() * 1000.0);
         let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
             let result = span.in_scope(work);
@@ -186,7 +226,7 @@ mod tests {
     // `recv_timeout` gives up.
     #[tokio::test]
     async fn run_keeps_the_runtime_free_while_the_work_blocks() {
-        let pool = Pool::new("test", 1);
+        let pool = Pool::new(Endpoint::ContractState, "test", 1);
         let (release, released) = mpsc::channel::<()>();
 
         let job = pool.run(move || {
@@ -202,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_keeps_the_permit_until_the_work_returns() {
-        let pool = Pool::new("test", 1);
+        let pool = Pool::new(Endpoint::ContractState, "test", 1);
         let (release, released) = mpsc::channel::<()>();
 
         // Stop waiting while the work still runs, as the handler does when it is dropped.
@@ -224,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_runs_no_more_jobs_than_permits() {
-        let pool = Arc::new(Pool::new("test", 1));
+        let pool = Arc::new(Pool::new(Endpoint::ContractState, "test", 1));
         let (release, released) = mpsc::channel::<()>();
         let first = tokio::spawn({
             let pool = Arc::clone(&pool);
@@ -259,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_reports_a_panicking_job_and_frees_its_permit() {
-        let pool = Pool::new("test", 1);
+        let pool = Pool::new(Endpoint::ContractState, "test", 1);
 
         let result = pool
             .run(|| -> () { panic!("job failed") })
@@ -352,7 +392,10 @@ mod tests {
         {
             let expected = HttpResponse::Ok().json(Arc::clone(&value));
 
-            let actual = off_worker.json(value).await.unwrap();
+            let actual = off_worker
+                .json(Endpoint::ContractState, value)
+                .await
+                .unwrap();
 
             assert_eq!(actual.status(), expected.status());
             let content_type = actix_web::http::header::CONTENT_TYPE;
@@ -371,8 +414,11 @@ mod tests {
     #[actix_web::test]
     async fn json_serializes_only_large_responses_off_the_worker() {
         let off_worker = OffWorker {
-            build_pool: Pool::new("build", 1),
-            serialize_pool: Pool::new("serialize", 0),
+            contract_state: EndpointPools {
+                build: Pool::new(Endpoint::ContractState, "build", 1),
+                serialize: Pool::new(Endpoint::ContractState, "serialize", 0),
+            },
+            protocol_state: EndpointPools::new(Endpoint::ProtocolState, 1),
         };
         let below = contract_state_response(slots_at_threshold() - 1, 0);
         let at = contract_state_response(slots_at_threshold(), 0);
@@ -380,11 +426,40 @@ mod tests {
         assert!(at.json_size_hint() >= OFF_WORKER_MIN_JSON_BYTES);
 
         let wait = Duration::from_millis(50);
-        let small = tokio::time::timeout(wait, off_worker.json(below)).await;
-        let large = tokio::time::timeout(wait, off_worker.json(at)).await;
+        let small =
+            tokio::time::timeout(wait, off_worker.json(Endpoint::ContractState, below)).await;
+        let large = tokio::time::timeout(wait, off_worker.json(Endpoint::ContractState, at)).await;
 
         let small = small.expect("a response below the threshold must not wait for a permit");
         assert_eq!(small.unwrap().status(), StatusCode::OK);
         assert!(large.is_err(), "a response at the threshold must wait for a permit");
+    }
+
+    // Every contract state pool is full, so only a job that does not queue behind contract state
+    // jobs can return.
+    #[actix_web::test]
+    async fn protocol_state_jobs_do_not_wait_for_contract_state_permits() {
+        let off_worker = OffWorker {
+            contract_state: EndpointPools::new(Endpoint::ContractState, 0),
+            protocol_state: EndpointPools::new(Endpoint::ProtocolState, 1),
+        };
+        let large = contract_state_response(slots_at_threshold(), 0);
+        let wait = Duration::from_millis(50);
+
+        let built =
+            tokio::time::timeout(wait, off_worker.build(Endpoint::ProtocolState, || 1)).await;
+        let contract_built =
+            tokio::time::timeout(wait, off_worker.build(Endpoint::ContractState, || 1)).await;
+        let contract_serialized =
+            tokio::time::timeout(wait, off_worker.json(Endpoint::ContractState, large)).await;
+
+        assert_eq!(
+            built
+                .expect("a protocol state build must not wait")
+                .unwrap(),
+            1
+        );
+        assert!(contract_built.is_err(), "a contract state build must wait for a permit");
+        assert!(contract_serialized.is_err(), "a contract state serialization must wait");
     }
 }

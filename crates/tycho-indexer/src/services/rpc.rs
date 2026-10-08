@@ -304,7 +304,7 @@ where
             let cache_request = request.clone();
             let answer = self
                 .off_worker
-                .build(move || service.contract_state(&cache_request))
+                .build(Endpoint::ContractState, move || service.contract_state(&cache_request))
                 .await?;
             match answer {
                 Ok(response) => return Ok(response),
@@ -580,7 +580,7 @@ where
             let cache_request = request.clone();
             let answer = self
                 .off_worker
-                .build(move || service.protocol_state(&cache_request))
+                .build(Endpoint::ProtocolState, move || service.protocol_state(&cache_request))
                 .await?;
             match answer {
                 Ok(response) => return Ok(response),
@@ -1299,7 +1299,12 @@ pub async fn contract_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_contract_state(&body).await;
 
     match response {
-        Ok(state) => handler.off_worker.json(state).await,
+        Ok(state) => {
+            handler
+                .off_worker
+                .json(Endpoint::ContractState, state)
+                .await
+        }
         Err(err) => {
             error!(error = %err, ?body, "Error while getting contract state.");
             Err(err)
@@ -1436,7 +1441,12 @@ pub async fn protocol_state<G: Gateway, T: EntryPointTracer>(
     let response = handler.get_protocol_state(&body).await;
 
     match response {
-        Ok(state) => handler.off_worker.json(state).await,
+        Ok(state) => {
+            handler
+                .off_worker
+                .json(Endpoint::ProtocolState, state)
+                .await
+        }
         Err(err) => {
             error!(error = %err, ?body, "Error while getting protocol states.");
             Err(err)

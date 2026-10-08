@@ -388,6 +388,10 @@ where
 
             app
         })
+        // The default is 512 threads divided across the workers. A worker that serves most
+        // connections could then queue state jobs behind each other inside tokio, although the
+        // `OffWorker` pools already bound how many run. Idle blocking threads exit after 10 s.
+        .worker_max_blocking_threads(512)
         .keep_alive(std::time::Duration::from_secs(60)) // prevents early connection closures
         // Allows clients up to 30 seconds to reconnect before forcefully closing the connection.
         // This prevents us from closing a connection the client is expecting to be able to reuse.
