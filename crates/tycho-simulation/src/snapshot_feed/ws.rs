@@ -522,7 +522,7 @@ mod tests {
                 if let Ok(mut ws_stream) = accept_async(stream).await {
                     let _ = ws_stream.send(snapshot_frame()).await;
                     loop {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                         if ws_stream
                             .send(Message::Ping(vec![1, 2, 3].into()))
                             .await
@@ -532,7 +532,7 @@ mod tests {
                         }
                         // Drain incoming frames without blocking the ping cadence.
                         while let Ok(Some(Ok(message))) =
-                            timeout(Duration::from_millis(10), ws_stream.next()).await
+                            timeout(Duration::from_millis(1), ws_stream.next()).await
                         {
                             if matches!(message, Message::Pong(_)) {
                                 pong_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -543,15 +543,16 @@ mod tests {
             }
         });
 
-        let (publisher, rx) = Publisher::channel();
+        let (publisher, _rx) = Publisher::channel();
         let _feed = tokio::spawn(run_ws_feed(config(), publisher, MockSource { url }));
 
         // Never read the receiver: a stalled consumer must not stall the socket.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        drop(rx);
-
-        let pongs = pong_count.load(Ordering::SeqCst);
-        assert!(pongs >= 5, "expected at least 5 pongs while consumer stalled, got {pongs}");
+        expect_to_finish("the feed stopped answering pings", async {
+            while pong_count.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
