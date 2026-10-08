@@ -1,3 +1,25 @@
+## [0.446.0](https://github.com/propeller-heads/tycho/compare/0.445.1...0.446.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **snapshot-feed:** report a panicked feed task as a message
+
+### Features
+
+* **snapshot-feed:** add the latest-value snapshot feed layer ([cf06a5a](https://github.com/propeller-heads/tycho/commit/cf06a5a1d4dcc3c5ddc7cef56e1672ce4818fc34))
+* **snapshot-feed:** add the latest-value snapshot feed layer ([#1554](https://github.com/propeller-heads/tycho/issues/1554)) ([5472845](https://github.com/propeller-heads/tycho/commit/5472845ee9b31fb7625d1af29c90040bf092de55))
+
+
+### Bug Fixes
+
+* **snapshot-feed:** count a handshake the source could not build ([7dbf14c](https://github.com/propeller-heads/tycho/commit/7dbf14c647e03fe312aac64a2b71f194120e7cbb)), closes [#1561](https://github.com/propeller-heads/tycho/issues/1561)
+
+
+### Code Refactoring
+
+* **snapshot-feed:** report a panicked feed task as a message ([8b14925](https://github.com/propeller-heads/tycho/commit/8b149255c767637b3d49ad665e3ddfa9572f331b))
+
 ## [0.445.1](https://github.com/propeller-heads/tycho/compare/0.445.0...0.445.1) (2026-10-08)
 
 
