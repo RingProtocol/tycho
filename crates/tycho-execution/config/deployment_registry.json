@@ -67,7 +67,10 @@
         "sky": "0x03AD6010948Ac034c0BbF7E449217798B4504E1D",
         "lido_v4": "0xbf33aa159aF2d96f4A10937B83Da8409264A760f",
         "etherfi": "0xA96354Bb15c3914d33332C6b898f801BabE7B814",
-        "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9"
+        "fallback": "0x355d1D7bd40330c235e1132de8D2314b956584c9",
+        "fallback:rfq:metric": "0x3067880b419209FC6e961F08E0cDFfC1F21d2873",
+        "fallback:rfq:bebop": "0x4dC7b66A563cEB85D3cD5998294c72ce7026894a",
+        "fallback:rfq:hashflow": "0xd2D7794bF5b6266Ba6C753BD3dc392a90a8b6a28"
       },
       "superseded": [{
         "status": "superseded",
@@ -108,7 +111,9 @@
         "aerodrome_v1": "0x76eeB7E737FDf441E0437F7051b4e0b84808c10a",
         "rfq:metric": "0x08b9228A2Ab320Fa5335322961ed60DA2e7cfFc2",
         "rfq:native": "0x4Ee002261A676D351705934c1bE26667d3f027bc",
-        "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De"
+        "fallback": "0x08f22285d13533d68aA8bE5949536322DB3538De",
+        "fallback:rfq:metric": "0x8e0d294fC45fdFb6De21ae533132872E37F22B5b",
+        "fallback:rfq:bebop": "0x683fDC846657A5108791C236c395C512bd7bD84B"
       },
       "superseded": [{
         "status": "superseded",
@@ -176,7 +181,8 @@
         "pancakeswap_v3": "0xCaAac0C6193E3e2e3E8E94bAf6367F75BaE591C9",
         "uniswap_v4": "0xdb696336F7A5F9048252664A3475C194dAe0e62f",
         "native_wrapper": "0x117ABa0Cc2fC158318cC5640A3F8da0C426cD4ab",
-        "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125"
+        "rfq:native": "0x73ab9F8741a4EF6cB44fc095BFc767B5E458E125",
+        "rfq:metric": "0x5dF460efec4cACA38d8115c6b36E9F7A6741eBCF"
       },
       "superseded": [{
         "status": "superseded",
@@ -317,7 +323,8 @@
         "ekubo_v3": "0x9F2CDF2615e4BFe38A51e23e3206dD4aE83bc48F",
         "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
         "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
-        "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D"
+        "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D",
+        "fallback:rfq:metric": "0x5ce13B5a3d41F22e28C4f76C115bd0c3ca70EE7C"
       },
       "superseded": [{
         "status": "superseded",
@@ -329,6 +336,32 @@
         "router": "0x345e48768a65Ae596ac6A2Aee71202753C4866F5",
         "fee_calculator": "0xd16DBe64E5688C5771E52D530E0C21B32901F141"
       }]
+    },
+    "arc": {
+      "chain_id": 5042,
+      "status": "active",
+      "effective_at": "2026-09-29T02:42:59Z",
+      "notice_published_at": "2026-09-29T02:42:59Z",
+      "migration_deadline": null,
+      "scheduled_successor": null,
+      "deployment_record_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
+      "dependency_snapshot": {
+        "source_commit": "629a473fe5b9ab24016f81eda1e968a6782aab53",
+        "executor_deployments_path": "crates/tycho-execution/config/executor_deployments.json",
+        "protocol_specific_addresses_path": "crates/tycho-execution/config/protocol_specific_addresses.json"
+      },
+      "router": {
+        "address": "0x72C452506a551C7fe069f1F66Beb671AC58909E9"
+      },
+      "fee_calculator": {
+        "address": "0x865CC7A956159467b800e9d51D73Fa57182dFD0C"
+      },
+      "executors": {
+        "uniswap_v2": "0x048eEE15C2Ec3b3114a6731f615088e79288Ef1c",
+        "uniswap_v3": "0xc2ee3AdEb7a38747EEA9ad31BF9517250912f015",
+        "uniswap_v4": "0xf7630dAAC56f3ee857cC3fCc758F67302542564D"
+      },
+      "superseded": []
     }
   }
 }

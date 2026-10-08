@@ -27,7 +27,8 @@ from being stored in the shell history.
    export BLOCKCHAIN_EXPLORER_API_KEY=<blockchain-explorer-api-key>
    ```
 
-On Robinhood Chain (`robinhood`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+On Robinhood Chain (`robinhood`) and Arc (`arc`), leave `BLOCKCHAIN_EXPLORER_API_KEY` unset.
+Arc verifies through Sourcify, which is where [arc-scan.org](https://arc-scan.org) reads verification from.
 
 If verification reports that Blockscout has not indexed the contract, re-run the deploy script
 later. Re-running skips a deployment that already exists.
@@ -92,37 +93,3 @@ Via the safe wallet UI:
        approved in their UI to execute on chain. Be sure to change the PRIVATE_KEY to that which has permissions on the
        safe wallet.
     2. If it's not set, it will submit the transaction directly to the chain.
-
-## Export Runtime Bytecode
-
-The `export-runtime-bytecode.js` script allows you to export the runtime bytecode of any executor contract for use in
-SDK testing.
-
-### Prerequisites
-
-1. Ensure the contract is compiled: `forge build`
-2. Start a local blockchain: `anvil` (or `anvil &` to run in background)
-
-### Usage
-
-```bash
-node scripts/export-runtime-bytecode.js <ContractName> [constructorArg1] [constructorArg2] ...
-```
-
-### Example
-
-```bash
-# Export BalancerV2Executor (requires permit2 address)
-node scripts/export-runtime-bytecode.js BalancerV2Executor 0x000000000022D473030F116dDEE9F6B43aC78BA3
-```
-
-### Output
-
-The script will:
-
-1. Deploy the contract with the provided constructor arguments to your local fork
-2. Extract the runtime bytecode (including immutables)
-3. Save it to `test/{ContractName}.runtime.json`
-
-The generated JSON file contains the runtime bytecode in the format expected by the SDK and should be copied to the
-appropriate SDK repository for testing. **Do not commit these files to this repository.**
