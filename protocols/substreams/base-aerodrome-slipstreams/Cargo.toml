@@ -28,3 +28,4 @@ getrandom = { version = "0.2", features = ["custom"] }
 [build-dependencies]
 anyhow = "1.0.75"
 substreams-ethereum = "0.9.9"
+
